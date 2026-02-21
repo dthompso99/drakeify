@@ -1,0 +1,41 @@
+llm_host = "http://127.0.0.1:11434"
+llm_model = "llama3.1:latest"
+llm_endpoint = "/v1/chat/completions"
+identity = "test-identity"
+context_size = 32768
+stream = true
+headless = true
+
+# Proxy Mode Configuration (only used when headless = true)
+proxy_port = 8082
+proxy_host = "0.0.0.0"
+proxy_session_timeout_mins = 60
+
+# System Prompt - Defines the agent's personality and behavior
+system_prompt = "You are a helpful AI assistant with access to tools and plugins. Be concise, accurate, and helpful."
+
+# Logging Configuration
+log_level = "info"  # Options: trace, debug, info, warn, error
+log_to_file = false
+log_file = "./agency.log"
+
+# Session Configuration
+sessions_dir = "./sessions"
+auto_save = true
+# session_id = ""  # Optional: Load a specific session on startup (leave empty for new session)
+
+# Tool/Plugin Configuration
+# enabled_tools = ["weather", "http_get"]  # Optional: Only enable specific tools (leave commented to enable all)
+# disabled_tools = ["filesystem_list"]  # Optional: Disable specific tools (leave commented to disable none)
+# enabled_plugins = ["conversation_logger", "http_logger"]  # Optional: Only enable specific plugins (leave commented to enable all)
+# disabled_plugins = ["hallucination_corrector"]  # Optional: Disable specific plugins (leave commented to disable none)
+
+# Temporarily disable ALL plugins and tools for testing client tool passthrough
+enabled_plugins = []
+enabled_tools = []
+
+# HTTP Configuration
+allow_http = true
+http_timeout_secs = 30
+http_max_response_size = 10485760  # 10MB in bytes
+# allowed_domains = ["httpbin.org", "api.example.com"]  # Optional: Uncomment to restrict to specific domains

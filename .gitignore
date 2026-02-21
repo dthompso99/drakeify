@@ -1,0 +1,19 @@
+# Rust
+/target
+Cargo.lock
+
+# Runtime artifacts
+/sessions
+*.log
+drakeify.toml
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

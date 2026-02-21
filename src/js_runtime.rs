@@ -1,0 +1,585 @@
+use anyhow::{Result, Context as AnyhowContext};
+use rquickjs::{Context, Function, Runtime, Ctx, Value};
+use std::rc::Rc;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use std::time::Duration;
+use std::collections::HashMap;
+
+/// Configuration for JavaScript runtime restrictions
+#[derive(Debug, Clone)]
+pub struct JsRuntimeConfig {
+    pub allow_http: bool,
+    pub http_timeout_secs: u64,
+    pub http_max_response_size: usize,
+    pub allowed_domains: Option<Vec<String>>, // None = allow all
+}
+
+impl Default for JsRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            allow_http: true,
+            http_timeout_secs: 30,
+            http_max_response_size: 10 * 1024 * 1024, // 10MB
+            allowed_domains: None, // Allow all by default
+        }
+    }
+}
+
+/// HTTP request options
+#[derive(Debug, Clone)]
+pub struct HttpRequestOptions {
+    pub method: String,
+    pub url: String,
+    pub headers: HashMap<String, String>,
+    pub body: Option<String>,
+    pub timeout_secs: Option<u64>,
+    pub parse_json: bool,
+}
+
+/// HTTP response
+#[derive(Debug, Clone)]
+pub struct HttpResponse {
+    pub success: bool,
+    pub status: u16,
+    pub status_text: String,
+    pub headers: HashMap<String, String>,
+    pub data: String,
+    pub error: Option<String>,
+}
+
+/// Setup the JavaScript runtime with console, Date, and HTTP support
+pub fn setup_js_globals(ctx: &Context, config: &JsRuntimeConfig) -> Result<()> {
+    ctx.with(|ctx| {
+        // Create a Rust-backed print function that JavaScript can call
+        let print_fn = Function::new(ctx.clone(), |msg: String| {
+            println!("{}", msg);
+        })?;
+
+        ctx.globals().set("__rust_print", print_fn)?;
+
+        // Setup console with JavaScript helper to convert all args to strings
+        let console_code = r#"
+            // Helper to convert any value to a string
+            function valueToString(val) {
+                if (val === null) return 'null';
+                if (val === undefined) return 'undefined';
+                if (typeof val === 'string') return val;
+                if (typeof val === 'number') return String(val);
+                if (typeof val === 'boolean') return String(val);
+                if (typeof val === 'object') {
+                    try {
+                        return JSON.stringify(val);
+                    } catch (e) {
+                        return '[object]';
+                    }
+                }
+                return String(val);
+            }
+
+            // Helper to format all arguments into a single string
+            function formatArgs(prefix, args) {
+                var parts = [prefix];
+                for (var i = 0; i < args.length; i++) {
+                    parts.push(valueToString(args[i]));
+                }
+                return parts.join(' ');
+            }
+
+            // Console implementation that calls Rust print function
+            globalThis.console = {
+                log: function() {
+                    __rust_print(formatArgs('[LOG]', arguments));
+                },
+                error: function() {
+                    __rust_print(formatArgs('[ERROR]', arguments));
+                },
+                warn: function() {
+                    __rust_print(formatArgs('[WARN]', arguments));
+                },
+                info: function() {
+                    __rust_print(formatArgs('[INFO]', arguments));
+                },
+                debug: function() {
+                    __rust_print(formatArgs('[DEBUG]', arguments));
+                }
+            };
+        "#;
+        let _: rquickjs::Value = ctx.eval(console_code.as_bytes())?;
+
+        // Setup Date object (QuickJS has built-in Date support, but let's ensure it's available)
+        let date_code = r#"
+            // QuickJS already has Date, but we can add helper methods if needed
+            if (typeof Date === 'undefined') {
+                throw new Error('Date is not available in this runtime');
+            }
+            
+            // Add a simple timestamp helper
+            globalThis.timestamp = function() {
+                return Date.now();
+            };
+        "#;
+        let _: rquickjs::Value = ctx.eval(date_code.as_bytes())?;
+
+        // Setup HTTP fetch function if allowed
+        if config.allow_http {
+            setup_http_fetch(&ctx, config)?;
+        }
+
+        Ok(())
+    })
+}
+
+/// Perform a comprehensive HTTP request with all options
+pub fn http_request_sync(options: HttpRequestOptions, config: &JsRuntimeConfig) -> Result<HttpResponse> {
+    // Validate URL
+    let parsed_url = url::Url::parse(&options.url)
+        .with_context(|| format!("Invalid URL: {}", options.url))?;
+
+    // Check domain whitelist if configured
+    if let Some(ref allowed_domains) = config.allowed_domains {
+        let host = parsed_url.host_str()
+            .ok_or_else(|| anyhow::anyhow!("URL has no host"))?;
+
+        if !allowed_domains.iter().any(|d| host.ends_with(d)) {
+            return Ok(HttpResponse {
+                success: false,
+                status: 0,
+                status_text: "Forbidden".to_string(),
+                headers: HashMap::new(),
+                data: String::new(),
+                error: Some(format!("Domain '{}' is not in allowed list", host)),
+            });
+        }
+    }
+
+    // Determine timeout
+    let timeout_secs = options.timeout_secs.unwrap_or(config.http_timeout_secs);
+    let max_size = config.http_max_response_size;
+    let method = options.method.to_uppercase();
+    let url = options.url.clone();
+    let headers = options.headers.clone();
+    let body = options.body.clone();
+    let parse_json = options.parse_json;
+
+    // Use tokio's spawn to run the async operation
+    let handle = tokio::runtime::Handle::try_current()
+        .map_err(|_| anyhow::anyhow!("No tokio runtime available"))?;
+
+    // Create a oneshot channel for the result
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    handle.spawn(async move {
+        let result = async {
+            // Build the HTTP client
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(timeout_secs))
+                .build()?;
+
+            // Build the request
+            let mut request = match method.as_str() {
+                "GET" => client.get(&url),
+                "POST" => client.post(&url),
+                "PUT" => client.put(&url),
+                "DELETE" => client.delete(&url),
+                "PATCH" => client.patch(&url),
+                "HEAD" => client.head(&url),
+                _ => return Err(anyhow::anyhow!("Unsupported HTTP method: {}", method)),
+            };
+
+            // Add headers
+            for (key, value) in headers {
+                request = request.header(&key, &value);
+            }
+
+            // Add body if present
+            if let Some(body_data) = body {
+                request = request.body(body_data);
+            }
+
+            // Send the request
+            let response = request.send().await
+                .with_context(|| format!("Failed to send {} request to {}", method, url))?;
+
+            // Get status
+            let status = response.status();
+            let status_code = status.as_u16();
+            let status_text = status.canonical_reason().unwrap_or("Unknown").to_string();
+
+            // Get headers
+            let mut response_headers = HashMap::new();
+            for (key, value) in response.headers() {
+                if let Ok(value_str) = value.to_str() {
+                    response_headers.insert(key.to_string(), value_str.to_string());
+                }
+            }
+
+            // Check response size
+            let content_length = response.content_length().unwrap_or(0);
+            if content_length > max_size as u64 {
+                return Ok(HttpResponse {
+                    success: false,
+                    status: status_code,
+                    status_text,
+                    headers: response_headers,
+                    data: String::new(),
+                    error: Some(format!(
+                        "Response size ({} bytes) exceeds maximum allowed ({} bytes)",
+                        content_length, max_size
+                    )),
+                });
+            }
+
+            // Get response body
+            let text = response.text().await?;
+
+            // Double-check actual size
+            if text.len() > max_size {
+                return Ok(HttpResponse {
+                    success: false,
+                    status: status_code,
+                    status_text,
+                    headers: response_headers,
+                    data: String::new(),
+                    error: Some(format!(
+                        "Response size ({} bytes) exceeds maximum allowed ({} bytes)",
+                        text.len(), max_size
+                    )),
+                });
+            }
+
+            // Parse JSON if requested
+            let data = if parse_json {
+                // Validate that it's valid JSON
+                match serde_json::from_str::<serde_json::Value>(&text) {
+                    Ok(_) => text,
+                    Err(e) => {
+                        return Ok(HttpResponse {
+                            success: false,
+                            status: status_code,
+                            status_text,
+                            headers: response_headers,
+                            data: text,
+                            error: Some(format!("Failed to parse JSON: {}", e)),
+                        });
+                    }
+                }
+            } else {
+                text
+            };
+
+            Ok(HttpResponse {
+                success: status.is_success(),
+                status: status_code,
+                status_text,
+                headers: response_headers,
+                data,
+                error: if status.is_success() { None } else { Some(format!("HTTP {}", status_code)) },
+            })
+        }.await;
+
+        let _ = tx.send(result);
+    });
+
+    // Wait for the result
+    rx.recv()
+        .map_err(|_| anyhow::anyhow!("HTTP request task failed"))?
+}
+
+/// Perform an HTTP GET request with safeguards (legacy function)
+/// This function is synchronous but performs async HTTP requests internally
+pub fn http_get_sync(url: String, config: &JsRuntimeConfig) -> Result<String> {
+    // Validate URL
+    let parsed_url = url::Url::parse(&url)
+        .with_context(|| format!("Invalid URL: {}", url))?;
+
+    // Check domain whitelist if configured
+    if let Some(ref allowed_domains) = config.allowed_domains {
+        let host = parsed_url.host_str()
+            .ok_or_else(|| anyhow::anyhow!("URL has no host"))?;
+
+        if !allowed_domains.iter().any(|d| host.ends_with(d)) {
+            return Err(anyhow::anyhow!("Domain '{}' is not in allowed list", host));
+        }
+    }
+
+    // Clone config for the async block
+    let timeout_secs = config.http_timeout_secs;
+    let max_size = config.http_max_response_size;
+
+    // Use tokio's spawn_blocking to run the async operation
+    // This avoids the "cannot block_on from within async" error
+    let handle = tokio::runtime::Handle::try_current()
+        .map_err(|_| anyhow::anyhow!("No tokio runtime available"))?;
+
+    // We need to use a different approach - create a oneshot channel
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    handle.spawn(async move {
+        let result = async {
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(timeout_secs))
+                .build()?;
+
+            let response = client.get(&url)
+                .send()
+                .await
+                .with_context(|| format!("Failed to fetch URL: {}", url))?;
+
+            // Check response size
+            let content_length = response.content_length().unwrap_or(0);
+            if content_length > max_size as u64 {
+                return Err(anyhow::anyhow!(
+                    "Response size ({} bytes) exceeds maximum allowed ({} bytes)",
+                    content_length,
+                    max_size
+                ));
+            }
+
+            let text = response.text().await?;
+
+            // Double-check actual size
+            if text.len() > max_size {
+                return Err(anyhow::anyhow!(
+                    "Response size ({} bytes) exceeds maximum allowed ({} bytes)",
+                    text.len(),
+                    max_size
+                ));
+            }
+
+            Ok(text)
+        }.await;
+
+        let _ = tx.send(result);
+    });
+
+    // Wait for the result
+    rx.recv()
+        .map_err(|_| anyhow::anyhow!("HTTP request task failed"))?
+}
+
+/// Perform an HTTP POST request with safeguards
+/// This function is synchronous but performs async HTTP requests internally
+pub fn http_post_sync(url: String, body: String, config: &JsRuntimeConfig) -> Result<String> {
+    // Validate URL
+    let parsed_url = url::Url::parse(&url)
+        .with_context(|| format!("Invalid URL: {}", url))?;
+
+    // Check domain whitelist if configured
+    if let Some(ref allowed_domains) = config.allowed_domains {
+        let host = parsed_url.host_str()
+            .ok_or_else(|| anyhow::anyhow!("URL has no host"))?;
+
+        if !allowed_domains.iter().any(|d| host.ends_with(d)) {
+            return Err(anyhow::anyhow!("Domain '{}' is not in allowed list", host));
+        }
+    }
+
+    // Clone config for the async block
+    let timeout_secs = config.http_timeout_secs;
+    let max_size = config.http_max_response_size;
+
+    // Use tokio's spawn to run the async operation
+    let handle = tokio::runtime::Handle::try_current()
+        .map_err(|_| anyhow::anyhow!("No tokio runtime available"))?;
+
+    // Create a oneshot channel for the result
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    handle.spawn(async move {
+        let result = async {
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(timeout_secs))
+                .build()?;
+
+            let response = client.post(&url)
+                .header("Content-Type", "application/json")
+                .body(body)
+                .send()
+                .await
+                .with_context(|| format!("Failed to POST to URL: {}", url))?;
+
+            // Check response size
+            let content_length = response.content_length().unwrap_or(0);
+            if content_length > max_size as u64 {
+                return Err(anyhow::anyhow!(
+                    "Response size ({} bytes) exceeds maximum allowed ({} bytes)",
+                    content_length,
+                    max_size
+                ));
+            }
+
+            let text = response.text().await?;
+
+            // Double-check actual size
+            if text.len() > max_size {
+                return Err(anyhow::anyhow!(
+                    "Response size ({} bytes) exceeds maximum allowed ({} bytes)",
+                    text.len(),
+                    max_size
+                ));
+            }
+
+            Ok(text)
+        }.await;
+
+        let _ = tx.send(result);
+    });
+
+    // Wait for the result
+    rx.recv()
+        .map_err(|_| anyhow::anyhow!("HTTP request task failed"))?
+}
+
+/// Setup HTTP fetch function with safeguards
+/// Note: The actual HTTP functions will be injected by tools.rs and plugins.rs
+/// This just sets up placeholder functions
+fn setup_http_fetch(ctx: &rquickjs::Ctx, _config: &JsRuntimeConfig) -> Result<()> {
+    // Setup placeholder JavaScript functions
+    // The actual implementation will be injected by the tool/plugin registry
+    let http_code = r#"
+        // Placeholder HTTP functions - will be replaced by Rust
+        globalThis.__rust_http_get = function(url) {
+            throw new Error('HTTP not available in this context');
+        };
+
+        globalThis.__rust_http_post = function(url, body) {
+            throw new Error('HTTP not available in this context');
+        };
+
+        globalThis.__rust_http_request = function(optionsJson) {
+            throw new Error('HTTP not available in this context');
+        };
+
+        // Comprehensive HTTP function
+        globalThis.http = function(options) {
+            // Validate options
+            if (!options || !options.url) {
+                return {
+                    success: false,
+                    status: 0,
+                    statusText: 'Bad Request',
+                    headers: {},
+                    data: null,
+                    error: 'URL is required'
+                };
+            }
+
+            // Build request options
+            var requestOptions = {
+                method: (options.method || 'GET').toUpperCase(),
+                url: options.url,
+                headers: options.headers || {},
+                body: null,
+                timeout: options.timeout,
+                parseJson: options.parseJson || false
+            };
+
+            // Handle body
+            if (options.body !== undefined && options.body !== null) {
+                if (typeof options.body === 'string') {
+                    requestOptions.body = options.body;
+                } else {
+                    // Auto-serialize objects to JSON
+                    requestOptions.body = JSON.stringify(options.body);
+                    if (!requestOptions.headers['Content-Type'] && !requestOptions.headers['content-type']) {
+                        requestOptions.headers['Content-Type'] = 'application/json';
+                    }
+                }
+            }
+
+            // Call Rust function
+            try {
+                var responseJson = __rust_http_request(JSON.stringify(requestOptions));
+                return JSON.parse(responseJson);
+            } catch (e) {
+                return {
+                    success: false,
+                    status: 0,
+                    statusText: 'Error',
+                    headers: {},
+                    data: null,
+                    error: String(e)
+                };
+            }
+        };
+
+        // HTTP GET wrapper (legacy, kept for compatibility)
+        globalThis.httpGet = function(url) {
+            try {
+                return {
+                    success: true,
+                    data: __rust_http_get(url)
+                };
+            } catch (e) {
+                return {
+                    success: false,
+                    error: String(e)
+                };
+            }
+        };
+
+        // HTTP POST wrapper (legacy, kept for compatibility)
+        globalThis.httpPost = function(url, data) {
+            try {
+                var body = typeof data === 'string' ? data : JSON.stringify(data);
+                return {
+                    success: true,
+                    data: __rust_http_post(url, body)
+                };
+            } catch (e) {
+                return {
+                    success: false,
+                    error: String(e)
+                };
+            }
+        };
+
+        // Convenience fetch-like API (now uses comprehensive http function)
+        globalThis.fetch = function(url, options) {
+            options = options || {};
+            return http({
+                method: options.method || 'GET',
+                url: url,
+                headers: options.headers,
+                body: options.body,
+                timeout: options.timeout,
+                parseJson: options.parseJson
+            });
+        };
+
+        // Helper functions
+        globalThis.buildQueryString = function(params) {
+            if (!params || typeof params !== 'object') return '';
+            var parts = [];
+            for (var key in params) {
+                if (params.hasOwnProperty(key)) {
+                    parts.push(encodeURIComponent(key) + '=' + encodeURIComponent(params[key]));
+                }
+            }
+            return parts.length > 0 ? '?' + parts.join('&') : '';
+        };
+
+        globalThis.parseJson = function(text) {
+            try {
+                return { success: true, data: JSON.parse(text), error: null };
+            } catch (e) {
+                return { success: false, data: null, error: String(e) };
+            }
+        };
+    "#;
+    let _: rquickjs::Value = ctx.eval(http_code.as_bytes())?;
+
+    Ok(())
+}
+
+/// Create a new JavaScript runtime with all globals configured
+pub fn create_configured_runtime(config: &JsRuntimeConfig) -> Result<(Rc<Runtime>, Context)> {
+    let runtime = Rc::new(Runtime::new()?);
+    let context = Context::full(&runtime)?;
+    
+    setup_js_globals(&context, config)?;
+    
+    Ok((runtime, context))
+}
+
