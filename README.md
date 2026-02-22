@@ -74,6 +74,19 @@ Edit `drakeify.toml` to configure your LLM endpoint and preferences.
 ./target/release/drakeify-cli chat
 ```
 
+The interactive mode supports slash commands for package management:
+```
+You: /help
+Available slash commands:
+  /packages ls <plugin|tool>                                    - List available packages
+  /packages publish <type> <path> <name> <ver> <desc> [author] - Publish a package
+  /packages install <plugin|tool> <name> <version>              - Install a package
+  /packages search <plugin|tool> <query>                        - Search for packages
+  /help                                                         - Show this help
+
+Slash commands are executed locally and do not go to the LLM.
+```
+
 **Proxy Mode:**
 ```bash
 ./target/release/drakeify

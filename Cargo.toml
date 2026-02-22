@@ -31,7 +31,7 @@ tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 hyper = "1.0"
 # OCI registry support for plugin/tool management
-oci-distribution = "0.11"
+oci-distribution = { version = "0.11", default-features = false, features = ["rustls-tls"] }
 sha2 = "0.10"
 tar = "0.4"
 flate2 = "1.0"

@@ -248,6 +248,100 @@ async fn handle_shell_command(command: &str) -> Result<()> {
     std::process::exit(output.status.code().unwrap_or(1));
 }
 
+/// Handle slash commands in interactive mode
+/// Returns true if the command was handled, false if it should be sent to LLM
+async fn handle_slash_command(input: &str, config: &DrakeifyConfig) -> Result<bool> {
+    if !input.starts_with('/') {
+        return Ok(false);
+    }
+
+    let parts: Vec<&str> = input.split_whitespace().collect();
+    if parts.is_empty() {
+        return Ok(false);
+    }
+
+    match parts[0] {
+        "/packages" => {
+            if parts.len() < 2 {
+                println!("Usage: /packages <ls|publish|install|search> [args...]");
+                println!("  /packages ls <plugin|tool>");
+                println!("  /packages publish <plugin|tool> <path> <name> <version> <description> [author] [license]");
+                println!("  /packages install <plugin|tool> <name> <version>");
+                println!("  /packages search <plugin|tool> <query>");
+                return Ok(true);
+            }
+
+            match parts[1] {
+                "ls" | "list" => {
+                    if parts.len() < 3 {
+                        println!("Usage: /packages ls <plugin|tool>");
+                        return Ok(true);
+                    }
+                    handle_list(config, parts[2].to_string()).await?;
+                }
+                "publish" => {
+                    if parts.len() < 7 {
+                        println!("Usage: /packages publish <plugin|tool> <path> <name> <version> <description> [author] [license]");
+                        return Ok(true);
+                    }
+                    let author = parts.get(7).map(|s| s.to_string());
+                    let license = parts.get(8).map(|s| s.to_string());
+                    handle_publish(
+                        config,
+                        parts[2].to_string(),
+                        parts[3].to_string(),
+                        parts[4].to_string(),
+                        parts[5].to_string(),
+                        parts[6].to_string(),
+                        author,
+                        license,
+                    ).await?;
+                }
+                "install" => {
+                    if parts.len() < 5 {
+                        println!("Usage: /packages install <plugin|tool> <name> <version>");
+                        return Ok(true);
+                    }
+                    handle_install(
+                        config,
+                        parts[2].to_string(),
+                        parts[3].to_string(),
+                        parts[4].to_string(),
+                    ).await?;
+                }
+                "search" => {
+                    if parts.len() < 4 {
+                        println!("Usage: /packages search <plugin|tool> <query>");
+                        return Ok(true);
+                    }
+                    // For now, search is the same as list
+                    println!("Searching for {}s matching '{}'...", parts[2], parts[3]);
+                    handle_list(config, parts[2].to_string()).await?;
+                }
+                _ => {
+                    println!("Unknown packages command: {}", parts[1]);
+                    println!("Available commands: ls, publish, install, search");
+                }
+            }
+            Ok(true)
+        }
+        "/help" => {
+            println!("\nAvailable slash commands:");
+            println!("  /packages ls <plugin|tool>                                    - List available packages");
+            println!("  /packages publish <type> <path> <name> <ver> <desc> [author] - Publish a package");
+            println!("  /packages install <plugin|tool> <name> <version>              - Install a package");
+            println!("  /packages search <plugin|tool> <query>                        - Search for packages");
+            println!("  /help                                                         - Show this help");
+            println!("\nSlash commands are executed locally and do not go to the LLM.\n");
+            Ok(true)
+        }
+        _ => {
+            println!("Unknown command: {}. Type /help for available commands.", parts[0]);
+            Ok(true)
+        }
+    }
+}
+
 /// Run interactive chat mode
 async fn run_interactive_mode(config: &DrakeifyConfig) -> Result<()> {
     info!("🤖 Drakeify Interactive Mode");
@@ -348,6 +442,13 @@ async fn run_interactive_mode(config: &DrakeifyConfig) -> Result<()> {
         }
 
         if user_input.is_empty() {
+            continue;
+        }
+
+        // Check for slash commands
+        if handle_slash_command(user_input, config).await? {
+            // Command was handled, continue to next iteration
+            println!();
             continue;
         }
 
