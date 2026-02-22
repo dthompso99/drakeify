@@ -365,9 +365,6 @@ pub async fn execute_request(
                 }
             }
             Err(err) => {
-                // TODO: there's 2 ways this could trigger
-                // a: the server responded with an error object -- then this is fine
-                // b: we received garbage json: we should try to recover it.
                 eprintln!("Error reading stream: {:?}", err);
                 break;
             }

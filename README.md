@@ -20,6 +20,12 @@ Drakeify is a model-agnostic control plane that transparently adds tool and plug
   - Auto-discovery from `plugins/` directory
   - Enable/disable plugins via configuration
 
+- **Plugin/Tool Management** 🆕
+  - Publish plugins and tools to OCI registries
+  - Install community plugins and tools with a single command
+  - Version management and distribution
+  - See [PLUGIN_MANAGEMENT.md](PLUGIN_MANAGEMENT.md) for details
+
 - **Session Management**
   - Persistent conversation history
   - Auto-save support
@@ -30,6 +36,13 @@ Drakeify is a model-agnostic control plane that transparently adds tool and plug
   - Client tools are returned for client-side execution
   - Seamless integration with tools from clients like Open WebUI
 
+## Architecture
+
+Drakeify consists of two binaries:
+
+- **`drakeify`** - HTTP proxy server (headless mode)
+- **`drakeify-cli`** - Interactive CLI, plugin/tool management, and shell compatibility
+
 ## Quick Start
 
 ### Build
@@ -37,6 +50,10 @@ Drakeify is a model-agnostic control plane that transparently adds tool and plug
 ```bash
 cargo build --release
 ```
+
+This builds both binaries:
+- `target/release/drakeify` - Proxy server
+- `target/release/drakeify-cli` - CLI tool
 
 ### Configuration
 
@@ -52,16 +69,29 @@ Edit `drakeify.toml` to configure your LLM endpoint and preferences.
 
 **Interactive CLI Mode:**
 ```bash
-cargo run
+./target/release/drakeify-cli
+# or
+./target/release/drakeify-cli chat
 ```
 
 **Proxy Mode:**
-Set `headless = true` in `drakeify.toml`, then:
 ```bash
-cargo run
+./target/release/drakeify
 ```
 
 The proxy server will start on the configured port (default: 8080).
+
+**Plugin/Tool Management:**
+```bash
+# Publish a plugin
+./target/release/drakeify-cli publish --package-type plugin --path ./my-plugin --name my-plugin --version 1.0.0 --description "My plugin"
+
+# Install a plugin
+./target/release/drakeify-cli install --package-type plugin --name my-plugin --version 1.0.0
+
+# List available packages
+./target/release/drakeify-cli list --package-type plugin
+```
 
 ### Docker
 
@@ -70,7 +100,7 @@ The proxy server will start on the configured port (default: 8080).
 docker build -t drakeify .
 ```
 
-**Run:**
+**Run Proxy:**
 ```bash
 docker run -p 8080:8080 \
   -e DRAKEIFY_LLM_HOST=http://host.docker.internal:11434 \
@@ -79,6 +109,11 @@ docker run -p 8080:8080 \
   -v $(pwd)/plugins:/plugins:ro \
   drakeify
 ```
+
+The Docker image includes both binaries:
+- `/drakeify` - Proxy server (default CMD)
+- `/drakeify-cli` - CLI tool
+- `/bin/sh` - Symlinked to drakeify-cli for k9s shell compatibility
 
 **Docker Compose:**
 ```bash

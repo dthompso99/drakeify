@@ -7,12 +7,12 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-api:
+  build-drakeify:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v3
-      - name: Build and push API image
+      - name: Build and push Drakeify image
         env:
           REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
           REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}

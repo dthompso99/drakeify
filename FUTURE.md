@@ -1,0 +1,34 @@
+The following is just a checklist of future plans, not in any particular order.  This is not a promise of when or if these will be implemented, just a list of ideas that have been bouncing around.  Contributions are welcome!
+
+## Future Plans
+ - Remote Agent Support
+   - allow tools to run on remote systems, and register themselves with drakeify
+ - Tool / Plugin Management
+   - create a platform to discover, install, update, and manage tools and plugins
+ - Micro LLM support
+   - embed a small LLM to handle simple tasks, and expose it to the plugin ecosystem.
+ - Cron Support
+   - allow plugins to schedule tasks to be run at a later time
+ - Better Session Managment
+   - allow sessions to be resumed, and for data to be persisted between runs
+   - not to be confused with memory
+ - Better Identity Management 
+   - allow for multiple identities to be used at once, and for them to be able to call each other
+ - Multi-LLM support
+   - allow for multiple LLMs to be used at once, and for them to be able to call each other
+ - Support for openai style api keys
+   - use api keys to tie together identities
+   - use api keys to track usage
+   - use api keys to enforce rate limits
+   - use api keys to enforce concurrency limits
+   - possible billing support for commercial applications
+ - expand testing
+   - test with existing agents such as claude code, zed, etc.
+   - create a test suite against multiple LLMs to ensure compatibility
+ - secrets management
+ - fine grained permissions
+   - while drakeify does not enable any dangerous tools by itself, pluging and tools can.
+ - explore the concept of "channels": 
+   - slack, discord, text.... IE: how the llm can reach out if needed
+   - the existing plugin/tool system MAY be sufficient, research is needed
+ - Proper streaming support

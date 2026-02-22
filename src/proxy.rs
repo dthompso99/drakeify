@@ -247,7 +247,7 @@ fn execute_tool_loop_sync(
         let mut current_request = OllamaRequest {
             model: state.llm_model.clone(),
             prompt: None,
-            stream: false, // TODO: Handle streaming later
+            stream: false,
             think: false,
             options: OllamaOptions {
                 num_ctx: state.context_size,

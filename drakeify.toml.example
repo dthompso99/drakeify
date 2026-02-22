@@ -39,3 +39,9 @@ allow_http = true
 http_timeout_secs = 30
 http_max_response_size = 10485760  # 10MB in bytes
 # allowed_domains = ["httpbin.org", "api.example.com"]  # Optional: Uncomment to restrict to specific domains
+
+# Plugin/Tool Registry Configuration
+registry_url = "https://zot.hallrd.click"
+# registry_username = ""  # Optional: For private registries
+# registry_password = ""  # Optional: For private registries
+# registry_insecure = false  # Optional: Allow insecure connections (default: false)

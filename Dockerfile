@@ -19,10 +19,15 @@ RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/
 
 FROM scratch AS runtime
 
-
 WORKDIR /
 
+# Copy both binaries
 COPY --from=builder /usr/src/drakeify/target/x86_64-unknown-linux-musl/release/drakeify /drakeify
+COPY --from=builder /usr/src/drakeify/target/x86_64-unknown-linux-musl/release/drakeify-cli /drakeify-cli
+
+# Symlink drakeify-cli to /bin/sh for k9s compatibility
+COPY --from=builder /usr/src/drakeify/target/x86_64-unknown-linux-musl/release/drakeify-cli /bin/sh
+
 COPY --from=certs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 # LLM Configuration

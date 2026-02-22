@@ -3,6 +3,14 @@ name = "drakeify"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "drakeify"
+path = "src/bin/drakeify.rs"
+
+[[bin]]
+name = "drakeify-cli"
+path = "src/bin/drakeify-cli.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
@@ -22,5 +30,12 @@ axum = "0.7"
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 hyper = "1.0"
+# OCI registry support for plugin/tool management
+oci-distribution = "0.11"
+sha2 = "0.10"
+tar = "0.4"
+flate2 = "1.0"
+semver = "1.0"
+clap = { version = "4.5", features = ["derive"] }
 
 
