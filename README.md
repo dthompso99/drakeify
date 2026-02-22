@@ -63,7 +63,35 @@ cargo run
 
 The proxy server will start on the configured port (default: 8080).
 
+### Docker
+
+**Build:**
+```bash
+docker build -t drakeify .
+```
+
+**Run:**
+```bash
+docker run -p 8080:8080 \
+  -e DRAKEIFY_LLM_HOST=http://host.docker.internal:11434 \
+  -e DRAKEIFY_LLM_MODEL=llama3.1:latest \
+  -v $(pwd)/tools:/tools:ro \
+  -v $(pwd)/plugins:/plugins:ro \
+  drakeify
+```
+
+**Docker Compose:**
+```bash
+docker-compose up
+```
+
+See `docker-compose.yml` for configuration options.
+
 ## Configuration
+
+Configuration can be set via `drakeify.toml` file or environment variables. **Environment variables take precedence** over the config file, making it ideal for containerized deployments.
+
+### Configuration File
 
 Key configuration options in `drakeify.toml`:
 
@@ -77,6 +105,35 @@ Key configuration options in `drakeify.toml`:
 - `disabled_plugins` - Blacklist of plugins to skip
 
 See `drakeify.toml.example` for all available options.
+
+### Environment Variables
+
+All configuration options can be overridden with environment variables using the `DRAKEIFY_` prefix:
+
+```bash
+# Override LLM settings
+export DRAKEIFY_LLM_HOST=http://localhost:11434
+export DRAKEIFY_LLM_MODEL=llama3.1:latest
+
+# Override proxy settings
+export DRAKEIFY_HEADLESS=true
+export DRAKEIFY_PROXY_PORT=8080
+export DRAKEIFY_PROXY_HOST=0.0.0.0
+
+# Override system prompt
+export DRAKEIFY_SYSTEM_PROMPT="You are a helpful assistant"
+
+# Override logging
+export DRAKEIFY_LOG_LEVEL=debug
+```
+
+This is especially useful for Docker deployments:
+
+```bash
+docker run -e DRAKEIFY_LLM_HOST=http://host.docker.internal:11434 \
+           -e DRAKEIFY_PROXY_PORT=8080 \
+           drakeify
+```
 
 ## Creating Tools
 

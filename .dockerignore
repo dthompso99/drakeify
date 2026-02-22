@@ -1,0 +1,36 @@
+# Rust build artifacts
+target/
+Cargo.lock
+
+# Runtime artifacts
+sessions/
+*.log
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+README.md
+ENV_VARS.md
+*.md
+
+# Test scripts
+test_*.sh
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose.yml
+

@@ -1,0 +1,35 @@
+name: Build Drakeify
+
+on:
+  push:
+    paths:
+      - 'src/**'
+  workflow_dispatch:
+
+jobs:
+  build-api:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Build and push API image
+        env:
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          REGISTRY_HOST: gitea.hallrd.click
+          NAMESPACE: dthompson
+          IMAGE_AGENT: drakeify
+        run: |
+          set -euo pipefail
+          # Clear any stale Rust build cache to avoid ICE
+          docker builder prune -f
+          docker build --no-cache --pull \
+            -t $REGISTRY_HOST/$NAMESPACE/$IMAGE_AGENT:latest \
+            -t $REGISTRY_HOST/$NAMESPACE/$IMAGE_AGENT:${{ github.sha }} \
+            --build-arg HEADLESS=true \
+            --build-arg PROXY_PORT=8080 \
+            --build-arg PROXY_HOST=0.0.0.0 \
+            -f Dockerfile .
+          echo "$REGISTRY_PASSWORD" | docker login $REGISTRY_HOST -u "$REGISTRY_USERNAME" --password-stdin
+          docker push $REGISTRY_HOST/$NAMESPACE/$IMAGE_AGENT:latest
+          docker push $REGISTRY_HOST/$NAMESPACE/$IMAGE_AGENT:${{ github.sha }}

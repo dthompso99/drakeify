@@ -84,6 +84,74 @@ struct DrakeifyConfig {
     allowed_domains: Option<Vec<String>>,
 }
 
+impl DrakeifyConfig {
+    /// Load configuration from file and override with environment variables
+    fn load_with_env() -> Result<Self> {
+        use std::env;
+
+        // Load base config from file (or use defaults if file doesn't exist)
+        let mut config: DrakeifyConfig = confy::load_path("./".to_owned() + env!("CARGO_PKG_NAME") + ".toml")
+            .unwrap_or_default();
+
+        // Override with environment variables if present
+        if let Ok(val) = env::var("DRAKEIFY_LLM_HOST") {
+            config.llm_host = val;
+        }
+        if let Ok(val) = env::var("DRAKEIFY_LLM_MODEL") {
+            config.llm_model = val;
+        }
+        if let Ok(val) = env::var("DRAKEIFY_LLM_ENDPOINT") {
+            config.llm_endpoint = val;
+        }
+        if let Ok(val) = env::var("DRAKEIFY_IDENTITY") {
+            config.identity = val;
+        }
+        if let Ok(val) = env::var("DRAKEIFY_CONTEXT_SIZE") {
+            config.context_size = val.parse().unwrap_or(config.context_size);
+        }
+        if let Ok(val) = env::var("DRAKEIFY_STREAM") {
+            config.stream = val.parse().unwrap_or(config.stream);
+        }
+        if let Ok(val) = env::var("DRAKEIFY_HEADLESS") {
+            config.headless = val.parse().unwrap_or(config.headless);
+        }
+        if let Ok(val) = env::var("DRAKEIFY_PROXY_PORT") {
+            config.proxy_port = val.parse().unwrap_or(config.proxy_port);
+        }
+        if let Ok(val) = env::var("DRAKEIFY_PROXY_HOST") {
+            config.proxy_host = val;
+        }
+        if let Ok(val) = env::var("DRAKEIFY_SYSTEM_PROMPT") {
+            config.system_prompt = val;
+        }
+        if let Ok(val) = env::var("DRAKEIFY_LOG_LEVEL") {
+            config.log_level = val;
+        }
+        if let Ok(val) = env::var("DRAKEIFY_LOG_TO_FILE") {
+            config.log_to_file = val.parse().unwrap_or(config.log_to_file);
+        }
+        if let Ok(val) = env::var("DRAKEIFY_LOG_FILE") {
+            config.log_file = val;
+        }
+        if let Ok(val) = env::var("DRAKEIFY_SESSIONS_DIR") {
+            config.sessions_dir = val;
+        }
+        if let Ok(val) = env::var("DRAKEIFY_AUTO_SAVE") {
+            config.auto_save = val.parse().unwrap_or(config.auto_save);
+        }
+        if let Ok(val) = env::var("DRAKEIFY_ALLOW_HTTP") {
+            config.allow_http = val.parse().unwrap_or(config.allow_http);
+        }
+        if let Ok(val) = env::var("DRAKEIFY_HTTP_TIMEOUT_SECS") {
+            config.http_timeout_secs = val.parse().unwrap_or(config.http_timeout_secs);
+        }
+        if let Ok(val) = env::var("DRAKEIFY_HTTP_MAX_RESPONSE_SIZE") {
+            config.http_max_response_size = val.parse().unwrap_or(config.http_max_response_size);
+        }
+        Ok(config)
+    }
+}
+
 fn default_system_prompt() -> String {
     "You are a helpful AI assistant with access to tools and plugins. Be concise, accurate, and helpful.".to_string()
 }
@@ -175,7 +243,7 @@ fn init_logging(config: &DrakeifyConfig) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config_result: DrakeifyConfig = confy::load_path("./".to_owned() + env!("CARGO_PKG_NAME") + ".toml")?;
+    let config_result = DrakeifyConfig::load_with_env()?;
 
     // Initialize logging
     init_logging(&config_result)?;
