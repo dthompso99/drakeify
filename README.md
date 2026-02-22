@@ -38,10 +38,22 @@ Drakeify is a model-agnostic control plane that transparently adds tool and plug
 
 ## Architecture
 
-Drakeify consists of two binaries:
+Drakeify consists of two binaries with clear security separation:
 
-- **`drakeify`** - HTTP proxy server (headless mode)
-- **`drakeify-cli`** - Interactive CLI, plugin/tool management, and shell compatibility
+### `drakeify` (Proxy Server - ~9.7MB)
+- HTTP proxy server that handles LLM requests
+- Loads and executes plugins/tools in isolated JavaScript runtime
+- OpenAI-compatible API endpoint (`/v1/chat/completions`)
+- Production-ready, stateless operation
+
+### `drakeify-cli` (CLI Client - ~9.5MB)
+- Pure HTTP client that connects to the proxy
+- **Does NOT load plugins/tools** (security separation)
+- Interactive chat mode via proxy
+- Plugin/tool package management (publish/install/list)
+- Shell compatibility for k9s
+
+**Security Model**: The CLI is a pure client and cannot execute arbitrary code. Only the proxy loads and executes plugins/tools in a controlled environment.
 
 ## Quick Start
 

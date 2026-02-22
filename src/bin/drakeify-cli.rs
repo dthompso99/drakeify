@@ -342,49 +342,11 @@ async fn handle_slash_command(input: &str, config: &DrakeifyConfig) -> Result<bo
     }
 }
 
-/// Run interactive chat mode
+/// Run interactive chat mode - acts as a pure HTTP client to the proxy
 async fn run_interactive_mode(config: &DrakeifyConfig) -> Result<()> {
     info!("🤖 Drakeify Interactive Mode");
+    info!("Connecting to proxy at http://{}:{}", config.proxy_host, config.proxy_port);
     info!("Type 'exit' or 'quit' to end the conversation\n");
-
-    // Create JavaScript runtime configuration
-    let js_config = JsRuntimeConfig {
-        allow_http: config.allow_http,
-        http_timeout_secs: config.http_timeout_secs,
-        http_max_response_size: config.http_max_response_size,
-        allowed_domains: config.allowed_domains.clone(),
-    };
-
-    // Initialize tool registry and auto-discover tools
-    let mut tool_registry = ToolRegistry::new(
-        js_config.clone(),
-        config.enabled_tools.clone(),
-        config.disabled_tools.clone()
-    )?;
-    tool_registry.load_tools_from_dir("tools")?;
-
-    let registered_tools = tool_registry.list_tools();
-    info!("Registered {} tools: {:?}", registered_tools.len(), registered_tools);
-
-    // Initialize plugin registry and auto-discover plugins
-    let mut plugin_registry = PluginRegistry::new(
-        js_config.clone(),
-        config.enabled_plugins.clone(),
-        config.disabled_plugins.clone()
-    )?;
-    plugin_registry.load_plugins_from_dir("plugins")?;
-
-    let registered_plugins = plugin_registry.get_plugins();
-    info!("Registered {} plugins", registered_plugins.len());
-    for plugin in registered_plugins {
-        info!("  - {} (priority: {}, hooks: {:?})", plugin.name, plugin.priority, plugin.hooks);
-    }
-
-    let llm_config = LlmConfig {
-        host: config.llm_host.clone(),
-        endpoint: config.llm_endpoint.clone(),
-        timeout_secs: 900,
-    };
 
     // Initialize session manager
     let mut session_manager = SessionManager::new(&config.sessions_dir, config.auto_save)?;
@@ -426,6 +388,13 @@ async fn run_interactive_mode(config: &DrakeifyConfig) -> Result<()> {
         session_manager.update_messages(conversation_messages.clone())?;
     }
 
+    // Create HTTP client for talking to the proxy
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(900))
+        .build()?;
+
+    let proxy_url = format!("http://{}:{}/v1/chat/completions", config.proxy_host, config.proxy_port);
+
     loop {
         // Get user input
         print!("You: ");
@@ -458,29 +427,51 @@ async fn run_interactive_mode(config: &DrakeifyConfig) -> Result<()> {
             content: user_input.to_string(),
             tool_calls: vec![],
         };
-        conversation_messages.push(user_message);
+        conversation_messages.push(user_message.clone());
 
-        // Run conversation with tool execution loop
+        // Send request to proxy
         print!("\nAssistant: ");
         std::io::stdout().flush()?;
 
-        let assistant_response = run_conversation(
-            &mut conversation_messages,
-            &config,
-            &llm_config,
-            &tool_registry,
-            &plugin_registry,
-        ).await?;
-
-        // Save entire conversation to session (includes all tool calls and responses)
-        session_manager.update_messages(conversation_messages.clone())?;
-
-        // Execute on_conversation_turn plugin hook
-        let turn_data = serde_json::json!({
-            "user_message": user_input,
-            "assistant_message": assistant_response,
+        let request_body = serde_json::json!({
+            "model": config.llm_model.clone(),
+            "messages": conversation_messages,
+            "stream": false,
         });
-        plugin_registry.execute_hook("on_conversation_turn", turn_data)?;
+
+        let response = client
+            .post(&proxy_url)
+            .json(&request_body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await?;
+            eprintln!("Error from proxy: {}", error_text);
+            conversation_messages.pop(); // Remove the user message we just added
+            continue;
+        }
+
+        let response_json: serde_json::Value = response.json().await?;
+
+        // Extract assistant message from response
+        let assistant_content = response_json["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("(no response)")
+            .to_string();
+
+        println!("{}\n", assistant_content);
+
+        // Add assistant response to conversation
+        let assistant_message = OllamaMessage {
+            role: "assistant".to_string(),
+            content: assistant_content,
+            tool_calls: vec![],
+        };
+        conversation_messages.push(assistant_message);
+
+        // Save entire conversation to session
+        session_manager.update_messages(conversation_messages.clone())?;
     }
 
     Ok(())
