@@ -88,6 +88,19 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Check if we're being invoked as /bin/sh without arguments
+    // This happens when k9s tries to open a shell
+    let args: Vec<String> = std::env::args().collect();
+    let program_name = args.get(0).map(|s| s.as_str()).unwrap_or("");
+
+    // If invoked as "sh" or "/bin/sh" without -c, provide a helpful message and exit
+    if (program_name.ends_with("/sh") || program_name == "sh") && args.len() == 1 {
+        eprintln!("drakeify-cli: This is a minimal shell for k9s compatibility.");
+        eprintln!("For interactive chat mode, use: drakeify-cli chat");
+        eprintln!("For package management, use: drakeify-cli --help");
+        std::process::exit(0);
+    }
+
     let cli = Cli::parse();
     let config = DrakeifyConfig::load_with_env()?;
 
@@ -230,22 +243,22 @@ async fn handle_list(
 
 /// Handle shell command execution (for k9s compatibility)
 async fn handle_shell_command(command: &str) -> Result<()> {
-    use std::process::Command;
+    let config = DrakeifyConfig::load_with_env()?;
 
-    // Execute the command using sh
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .output()?;
-
-    // Print stdout
-    std::io::stdout().write_all(&output.stdout)?;
-
-    // Print stderr
-    std::io::stderr().write_all(&output.stderr)?;
-
-    // Exit with the same code as the command
-    std::process::exit(output.status.code().unwrap_or(1));
+    // If the command starts with /, treat it as a slash command
+    if command.trim().starts_with('/') {
+        // Execute the slash command
+        if handle_slash_command(command.trim(), &config).await? {
+            println!("Command executed successfully");
+        }
+        // After executing slash command, enter interactive mode
+        info!("Entering interactive mode...");
+        run_interactive_mode(&config).await
+    } else {
+        // For non-slash commands, just enter interactive mode
+        info!("Entering interactive mode (shell command '{}' ignored)", command);
+        run_interactive_mode(&config).await
+    }
 }
 
 /// Handle slash commands in interactive mode

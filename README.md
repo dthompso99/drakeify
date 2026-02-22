@@ -51,7 +51,12 @@ Drakeify consists of two binaries with clear security separation:
 - **Does NOT load plugins/tools** (security separation)
 - Interactive chat mode via proxy
 - Plugin/tool package management (publish/install/list)
-- Shell compatibility for k9s
+- k9s shell compatibility (symlinked to `/bin/sh` in container)
+  - Exits gracefully when invoked without arguments
+  - When invoked with `-c <command>`:
+    - If command starts with `/`, executes as slash command then enters interactive mode
+    - Otherwise, enters interactive mode directly
+  - Enables package management and chat from k9s shell
 
 **Security Model**: The CLI is a pure client and cannot execute arbitrary code. Only the proxy loads and executes plugins/tools in a controlled environment.
 
