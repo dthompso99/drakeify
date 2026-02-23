@@ -665,7 +665,7 @@ async fn run_interactive_mode(config: &DrakeifyConfig) -> Result<()> {
             "model": config.llm_model.clone(),
             "messages": conversation_messages,
             "tools": client_tools,
-            "stream": false,
+            "stream": true,
         });
 
         let response = client
@@ -681,7 +681,83 @@ async fn run_interactive_mode(config: &DrakeifyConfig) -> Result<()> {
             continue;
         }
 
-        let response_json: serde_json::Value = response.json().await?;
+        // Check if response is SSE stream
+        let content_type = response.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        let response_json: serde_json::Value = if content_type.contains("text/event-stream") {
+            // Handle SSE streaming response
+            use futures_util::StreamExt;
+            use colored::Colorize;
+            let mut stream = response.bytes_stream();
+            let mut accumulated_content = String::new();
+            let mut tool_calls_json: Option<serde_json::Value> = None;
+            let mut last_was_thinking = false;
+
+            while let Some(chunk) = stream.next().await {
+                match chunk {
+                    Ok(bytes) => {
+                        let text = String::from_utf8_lossy(&bytes);
+                        for line in text.lines() {
+                            if let Some(data) = line.strip_prefix("data: ") {
+                                if data == "[DONE]" {
+                                    break;
+                                }
+                                if let Ok(chunk_json) = serde_json::from_str::<serde_json::Value>(data) {
+                                    // Handle thinking/status updates
+                                    if let Some(thinking) = chunk_json["choices"][0]["delta"]["thinking"].as_str() {
+                                        if !last_was_thinking && !accumulated_content.is_empty() {
+                                            // If we had content, add a newline before first thinking
+                                            println!();
+                                        }
+                                        // Show thinking message in dimmed blue
+                                        println!("{}", thinking.dimmed().blue());
+                                        last_was_thinking = true;
+                                    }
+                                    // Handle content chunks
+                                    else if let Some(content) = chunk_json["choices"][0]["delta"]["content"].as_str() {
+                                        if last_was_thinking {
+                                            // Add newline after thinking messages
+                                            last_was_thinking = false;
+                                        }
+                                        print!("{}", content);
+                                        std::io::stdout().flush()?;
+                                        accumulated_content.push_str(content);
+                                    }
+                                    // Check for tool calls in the chunk
+                                    if let Some(tc) = chunk_json["choices"][0]["message"]["tool_calls"].as_array() {
+                                        if !tc.is_empty() {
+                                            tool_calls_json = Some(chunk_json["choices"][0]["message"]["tool_calls"].clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("\nError reading stream: {}", e);
+                        break;
+                    }
+                }
+            }
+
+            println!(); // New line after streaming
+
+            // Construct a response JSON similar to non-streaming format
+            serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "content": accumulated_content,
+                        "tool_calls": tool_calls_json
+                    }
+                }]
+            })
+        } else {
+            // Handle non-streaming JSON response
+            response.json().await?
+        };
 
         // Extract assistant message from response
         let assistant_content = response_json["choices"][0]["message"]["content"]

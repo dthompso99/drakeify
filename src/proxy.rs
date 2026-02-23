@@ -1,7 +1,7 @@
 use axum::{
     extract::State,
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Response, sse::{Event, Sse}},
     routing::post,
     Json, Router,
 };
@@ -12,6 +12,8 @@ use tokio::sync::RwLock;
 use tower_http::cors::{CorsLayer, Any};
 use tracing::{info, debug, error};
 use anyhow::Result;
+use futures_util::stream::Stream;
+use tokio_stream::StreamExt;
 
 use crate::llm::{OllamaMessage, OllamaRequest, OllamaOptions, OllamaFunction, OllamaToolCall, OllamaFunctionCall, LlmConfig};
 use crate::js_runtime::JsRuntimeConfig;
@@ -226,17 +228,36 @@ fn convert_client_tools_to_ollama(client_tools: &[ToolDefinition]) -> Vec<Ollama
     }).collect()
 }
 
-/// Execute the tool loop - similar to run_conversation in main.rs but for proxy mode
-/// This transparently executes Agency tools behind the scenes
+/// Message types for streaming updates
+#[derive(Debug, Clone)]
+enum StreamMessage {
+    /// Content chunk from LLM
+    Content(String),
+    /// Thinking/status update
+    Thinking(String),
+    /// Tool call being executed
+    ToolCall(String, String), // tool_name, args
+    /// Tool result
+    ToolResult(String, String), // tool_name, result
+    /// Error occurred
+    Error(String),
+    /// Stream finished
+    Done,
+}
+
+/// Execute the tool loop with streaming updates
 /// This is a synchronous function that runs in a blocking task
-fn execute_tool_loop_sync(
+fn execute_tool_loop_streaming(
     conversation_messages: &mut Vec<OllamaMessage>,
     state: &ProxyState,
     tool_registry: &crate::tools::ToolRegistry,
     plugin_registry: &crate::plugins::PluginRegistry,
     client_tools: &[ToolDefinition],
+    tx: &tokio::sync::mpsc::UnboundedSender<StreamMessage>,
 ) -> Result<ToolLoopResult> {
     let mut assistant_response = String::new();
+
+    let _ = tx.send(StreamMessage::Thinking("Processing request...".to_string()));
 
     loop {
         // Combine Agency tools + client tools
@@ -276,6 +297,7 @@ fn execute_tool_loop_sync(
         }
 
         debug!("Sending request to LLM with {} tools", current_request.tools.len());
+        let _ = tx.send(StreamMessage::Thinking("Waiting for LLM response...".to_string()));
 
         // Execute LLM request (no streaming for now, no plugin hooks yet)
         // Use block_on since we're in a blocking task
@@ -300,6 +322,9 @@ fn execute_tool_loop_sync(
         // If no tool calls, we're done
         if final_tool_calls.is_empty() {
             debug!("No tool calls, returning final response");
+
+            // Send the final content
+            let _ = tx.send(StreamMessage::Content(final_content.clone()));
 
             // Add final assistant message to conversation (without tool_calls)
             conversation_messages.push(OllamaMessage {
@@ -335,6 +360,7 @@ fn execute_tool_loop_sync(
             });
 
             debug!("Executing {} Agency tool(s)", agency_tool_calls.len());
+            let _ = tx.send(StreamMessage::Thinking(format!("Executing {} tool(s)...", agency_tool_calls.len())));
 
             for tool_call in &agency_tool_calls {
                 let tool_name = &tool_call.function.name;
@@ -353,6 +379,10 @@ fn execute_tool_loop_sync(
                 }
 
                 debug!("   🔧 Executing tool: {}", tool_name);
+                let _ = tx.send(StreamMessage::ToolCall(
+                    tool_name.clone(),
+                    serde_json::to_string(&args_value).unwrap_or_default()
+                ));
 
                 match tool_registry.execute(tool_name, args_value.clone()) {
                     Ok(mut result) => {
@@ -370,6 +400,10 @@ fn execute_tool_loop_sync(
                         }
 
                         debug!("   ✅ Tool result: {}", serde_json::to_string_pretty(&result)?);
+                        let _ = tx.send(StreamMessage::ToolResult(
+                            tool_name.clone(),
+                            serde_json::to_string(&result).unwrap_or_default()
+                        ));
 
                         // Add tool result to conversation
                         conversation_messages.push(OllamaMessage {
@@ -380,6 +414,7 @@ fn execute_tool_loop_sync(
                     }
                     Err(e) => {
                         error!("   ❌ Error executing tool {}: {}", tool_name, e);
+                        let _ = tx.send(StreamMessage::Error(format!("Tool {} failed: {}", tool_name, e)));
 
                         // Add error to conversation
                         conversation_messages.push(OllamaMessage {
@@ -393,11 +428,13 @@ fn execute_tool_loop_sync(
 
             // Continue loop to send tool results back to LLM
             debug!("Sending tool results back to LLM");
+            let _ = tx.send(StreamMessage::Thinking("Processing tool results...".to_string()));
         }
 
         // If there are client tools, return them to the client
         if !client_tool_calls.is_empty() {
             debug!("Returning {} client tool call(s) to client", client_tool_calls.len());
+            let _ = tx.send(StreamMessage::Error("Client tool calls not supported in streaming mode".to_string()));
 
             // Add assistant message with client tool calls to conversation
             conversation_messages.push(OllamaMessage {
@@ -433,7 +470,205 @@ fn execute_tool_loop_sync(
     });
     let _ = plugin_registry.execute_hook("on_conversation_turn", turn_data);
 
+    let _ = tx.send(StreamMessage::Done);
     Ok(ToolLoopResult::FinalResponse(assistant_response))
+}
+
+/// Execute the tool loop - similar to run_conversation in main.rs but for proxy mode
+/// This transparently executes Agency tools behind the scenes
+/// This is a synchronous function that runs in a blocking task (non-streaming version)
+fn execute_tool_loop_sync(
+    conversation_messages: &mut Vec<OllamaMessage>,
+    state: &ProxyState,
+    tool_registry: &crate::tools::ToolRegistry,
+    plugin_registry: &crate::plugins::PluginRegistry,
+    client_tools: &[ToolDefinition],
+) -> Result<ToolLoopResult> {
+    // Create a dummy channel for the streaming version
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    execute_tool_loop_streaming(conversation_messages, state, tool_registry, plugin_registry, client_tools, &tx)
+}
+
+/// Handle streaming chat completion request
+async fn handle_streaming_request(
+    state: Arc<ProxyState>,
+    request: ChatCompletionRequest,
+) -> Response {
+    use tokio_stream::wrappers::UnboundedReceiverStream;
+    use std::convert::Infallible;
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let model = request.model.clone();
+
+    // Spawn task to handle the streaming
+    tokio::spawn(async move {
+        // Convert OpenAI messages to Ollama format
+        let mut conversation_messages: Vec<OllamaMessage> = request.messages.iter().map(|msg| {
+            OllamaMessage {
+                role: msg.role.clone(),
+                content: msg.content.clone().unwrap_or_default(),
+                tool_calls: vec![],
+            }
+        }).collect();
+
+        let state_clone = state.as_ref().clone();
+        let client_tools = request.tools.clone();
+        let tx_clone = tx.clone();
+
+        // Execute in blocking task
+        let result = tokio::task::spawn_blocking(move || {
+            // Create tool and plugin registries
+            let mut tool_registry = match crate::tools::ToolRegistry::new(
+                state_clone.js_config.clone(),
+                state_clone.enabled_tools.clone(),
+                state_clone.disabled_tools.clone()
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx_clone.send(StreamMessage::Error(format!("Failed to create tool registry: {}", e)));
+                    return;
+                }
+            };
+
+            if let Err(e) = tool_registry.load_tools_from_dir("tools") {
+                error!("Failed to load tools: {}", e);
+            }
+
+            let mut plugin_registry = match crate::plugins::PluginRegistry::new(
+                state_clone.js_config.clone(),
+                state_clone.enabled_plugins.clone(),
+                state_clone.disabled_plugins.clone()
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx_clone.send(StreamMessage::Error(format!("Failed to create plugin registry: {}", e)));
+                    return;
+                }
+            };
+
+            if let Err(e) = plugin_registry.load_plugins_from_dir("plugins") {
+                error!("Failed to load plugins: {}", e);
+            }
+
+            // Execute the streaming tool loop
+            match execute_tool_loop_streaming(
+                &mut conversation_messages,
+                &state_clone,
+                &tool_registry,
+                &plugin_registry,
+                &client_tools,
+                &tx_clone,
+            ) {
+                Ok(_) => {
+                    // Stream messages are already sent via tx_clone
+                }
+                Err(e) => {
+                    let _ = tx_clone.send(StreamMessage::Error(format!("Error: {}", e)));
+                }
+            }
+        }).await;
+
+        if let Err(e) = result {
+            let _ = tx.send(StreamMessage::Error(format!("Task error: {}", e)));
+        }
+    });
+
+    // Create SSE stream
+    let stream = UnboundedReceiverStream::new(rx).map(move |msg| {
+        match msg {
+            StreamMessage::Content(content) => {
+                // Send content chunk
+                let chunk = serde_json::json!({
+                    "id": format!("chatcmpl-{}", chrono::Utc::now().timestamp()),
+                    "object": "chat.completion.chunk",
+                    "created": chrono::Utc::now().timestamp(),
+                    "model": model.clone(),
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": content},
+                        "finish_reason": null
+                    }]
+                });
+                Ok::<_, Infallible>(Event::default().data(serde_json::to_string(&chunk).unwrap()))
+            }
+            StreamMessage::Thinking(status) => {
+                // Send thinking/status update
+                let chunk = serde_json::json!({
+                    "id": format!("chatcmpl-{}", chrono::Utc::now().timestamp()),
+                    "object": "chat.completion.chunk",
+                    "created": chrono::Utc::now().timestamp(),
+                    "model": model.clone(),
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"thinking": status},
+                        "finish_reason": null
+                    }]
+                });
+                Ok(Event::default().data(serde_json::to_string(&chunk).unwrap()))
+            }
+            StreamMessage::ToolCall(tool_name, args) => {
+                // Send tool call notification
+                let chunk = serde_json::json!({
+                    "id": format!("chatcmpl-{}", chrono::Utc::now().timestamp()),
+                    "object": "chat.completion.chunk",
+                    "created": chrono::Utc::now().timestamp(),
+                    "model": model.clone(),
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"thinking": format!("🔧 Executing tool: {}", tool_name)},
+                        "finish_reason": null
+                    }]
+                });
+                Ok(Event::default().data(serde_json::to_string(&chunk).unwrap()))
+            }
+            StreamMessage::ToolResult(tool_name, _result) => {
+                // Send tool result notification
+                let chunk = serde_json::json!({
+                    "id": format!("chatcmpl-{}", chrono::Utc::now().timestamp()),
+                    "object": "chat.completion.chunk",
+                    "created": chrono::Utc::now().timestamp(),
+                    "model": model.clone(),
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"thinking": format!("✅ Tool {} completed", tool_name)},
+                        "finish_reason": null
+                    }]
+                });
+                Ok(Event::default().data(serde_json::to_string(&chunk).unwrap()))
+            }
+            StreamMessage::Error(e) => {
+                let error_chunk = serde_json::json!({
+                    "id": format!("chatcmpl-{}", chrono::Utc::now().timestamp()),
+                    "object": "chat.completion.chunk",
+                    "created": chrono::Utc::now().timestamp(),
+                    "model": model.clone(),
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": format!("\n\nError: {}\n", e)},
+                        "finish_reason": "error"
+                    }]
+                });
+                Ok(Event::default().data(serde_json::to_string(&error_chunk).unwrap()))
+            }
+            StreamMessage::Done => {
+                // Send final done chunk
+                let chunk = serde_json::json!({
+                    "id": format!("chatcmpl-{}", chrono::Utc::now().timestamp()),
+                    "object": "chat.completion.chunk",
+                    "created": chrono::Utc::now().timestamp(),
+                    "model": model.clone(),
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop"
+                    }]
+                });
+                Ok(Event::default().data(serde_json::to_string(&chunk).unwrap()))
+            }
+        }
+    });
+
+    Sse::new(stream).into_response()
 }
 
 /// Handler for /v1/chat/completions endpoint
@@ -476,6 +711,12 @@ async fn chat_completions_handler(
     }
 
     debug!("Request details: {:?}", request);
+
+    // Check if streaming is requested
+    if request.stream {
+        info!("📡 Streaming mode requested");
+        return handle_streaming_request(state, request).await;
+    }
 
     // Convert OpenAI messages to Ollama format
     let mut conversation_messages: Vec<OllamaMessage> = request.messages.iter().map(|msg| {

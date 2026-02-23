@@ -29,4 +29,4 @@ The following is just a checklist of future plans, not in any particular order. 
  - explore the concept of "channels": 
    - slack, discord, text.... IE: how the llm can reach out if needed
    - the existing plugin/tool system MAY be sufficient, research is needed
- - Proper streaming support
+ - [x] Proper streaming support
