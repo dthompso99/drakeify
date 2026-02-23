@@ -2,7 +2,7 @@ use axum::{
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response, sse::{Event, Sse}},
-    routing::post,
+    routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -10,13 +10,124 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::cors::{CorsLayer, Any};
-use tracing::{info, debug, error};
+use tracing::{info, debug, error, warn};
 use anyhow::Result;
 use futures_util::stream::Stream;
 use tokio_stream::StreamExt;
 
 use crate::llm::{OllamaMessage, OllamaRequest, OllamaOptions, OllamaFunction, OllamaToolCall, OllamaFunctionCall, LlmConfig};
 use crate::js_runtime::JsRuntimeConfig;
+
+/// Anthropic Messages API request
+#[derive(Debug, Deserialize)]
+pub struct AnthropicMessagesRequest {
+    pub model: String,
+    pub messages: Vec<AnthropicMessage>,
+    #[serde(default)]
+    pub max_tokens: u32,
+    #[serde(default)]
+    pub tools: Vec<AnthropicTool>,
+    #[serde(default)]
+    pub stream: bool,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub system: Option<String>,
+}
+
+/// Anthropic message format
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnthropicMessage {
+    pub role: String,
+    pub content: AnthropicContent,
+}
+
+/// Anthropic content can be string or array of content blocks
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AnthropicContent {
+    Text(String),
+    Blocks(Vec<AnthropicContentBlock>),
+}
+
+/// Anthropic content block
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum AnthropicContentBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "tool_use")]
+    ToolUse {
+        id: String,
+        name: String,
+        input: Value,
+    },
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+    },
+}
+
+/// Anthropic tool definition
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnthropicTool {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+}
+
+/// Anthropic Messages API response
+#[derive(Debug, Serialize)]
+pub struct AnthropicMessagesResponse {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub response_type: String,
+    pub role: String,
+    pub content: Vec<AnthropicContentBlock>,
+    pub model: String,
+    pub stop_reason: Option<String>,
+    pub usage: AnthropicUsage,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AnthropicUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
+/// Token count request
+#[derive(Debug, Deserialize)]
+pub struct AnthropicCountTokensRequest {
+    pub model: String,
+    pub messages: Vec<AnthropicMessage>,
+    #[serde(default)]
+    pub system: Option<String>,
+    #[serde(default)]
+    pub tools: Vec<AnthropicTool>,
+}
+
+/// Token count response
+#[derive(Debug, Serialize)]
+pub struct AnthropicCountTokensResponse {
+    pub input_tokens: u32,
+}
+
+/// Models list response
+#[derive(Debug, Serialize)]
+pub struct ModelsResponse {
+    pub object: String,
+    pub data: Vec<ModelInfo>,
+}
+
+/// Model information
+#[derive(Debug, Serialize)]
+pub struct ModelInfo {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub owned_by: String,
+}
 
 /// OpenAI-compatible chat completion request
 #[derive(Debug, Deserialize)]
@@ -105,6 +216,88 @@ pub struct ProxyState {
     pub disabled_plugins: Option<Vec<String>>,
 }
 
+/// Convert Anthropic Messages format to OpenAI Chat Completions format
+fn anthropic_to_openai(anthropic_req: AnthropicMessagesRequest) -> ChatCompletionRequest {
+    let mut openai_messages = Vec::new();
+
+    // Add system message if present
+    if let Some(system) = anthropic_req.system {
+        openai_messages.push(ChatMessage {
+            role: "system".to_string(),
+            content: Some(system),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+    }
+
+    // Convert messages
+    for msg in anthropic_req.messages {
+        let content = match msg.content {
+            AnthropicContent::Text(text) => Some(text),
+            AnthropicContent::Blocks(blocks) => {
+                // Extract text from blocks
+                let text: String = blocks.iter()
+                    .filter_map(|block| match block {
+                        AnthropicContentBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Some(text)
+            }
+        };
+
+        openai_messages.push(ChatMessage {
+            role: msg.role,
+            content,
+            tool_calls: None,
+            tool_call_id: None,
+        });
+    }
+
+    // Convert tools
+    let tools: Vec<ToolDefinition> = anthropic_req.tools.iter().map(|tool| {
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                parameters: tool.input_schema.clone(),
+            },
+        }
+    }).collect();
+
+    ChatCompletionRequest {
+        model: anthropic_req.model,
+        messages: openai_messages,
+        tools,
+        stream: anthropic_req.stream,
+        temperature: anthropic_req.temperature,
+        max_tokens: Some(anthropic_req.max_tokens),
+    }
+}
+
+/// Convert OpenAI response to Anthropic Messages format
+fn openai_to_anthropic(openai_resp: ChatCompletionResponse) -> AnthropicMessagesResponse {
+    let choice = &openai_resp.choices[0];
+    let content = vec![AnthropicContentBlock::Text {
+        text: choice.message.content.clone().unwrap_or_default(),
+    }];
+
+    AnthropicMessagesResponse {
+        id: openai_resp.id,
+        response_type: "message".to_string(),
+        role: "assistant".to_string(),
+        content,
+        model: openai_resp.model,
+        stop_reason: choice.finish_reason.clone(),
+        usage: AnthropicUsage {
+            input_tokens: 0,
+            output_tokens: 0,
+        },
+    }
+}
+
 /// Start the proxy server
 pub async fn start_proxy_server(
     host: String,
@@ -146,6 +339,9 @@ pub async fn start_proxy_server(
 
     let app = Router::new()
         .route("/v1/chat/completions", post(chat_completions_handler))
+        .route("/v1/messages", post(anthropic_messages_handler))
+        .route("/v1/messages/count_tokens", post(anthropic_count_tokens_handler))
+        .route("/v1/models", get(models_handler))
         .layer(cors)
         .with_state(state);
 
@@ -708,6 +904,101 @@ async fn handle_streaming_request(
     });
 
     Sse::new(stream).into_response()
+}
+
+/// Handler for /v1/messages endpoint (Anthropic Messages API)
+async fn anthropic_messages_handler(
+    State(state): State<Arc<ProxyState>>,
+    Json(request): Json<AnthropicMessagesRequest>,
+) -> Response {
+    info!("📨 Received Anthropic Messages API request for model: {}", request.model);
+
+    // Convert Anthropic format to OpenAI format
+    let openai_request = anthropic_to_openai(request);
+
+    // Call the existing chat completions handler logic
+    let response = chat_completions_handler(State(state), Json(openai_request)).await;
+
+    // For now, return the response as-is
+    // TODO: Convert OpenAI response back to Anthropic format for non-streaming
+    response
+}
+
+/// Handler for /v1/messages/count_tokens endpoint
+async fn anthropic_count_tokens_handler(
+    State(_state): State<Arc<ProxyState>>,
+    Json(request): Json<AnthropicCountTokensRequest>,
+) -> Response {
+    info!("📊 Received token count request for model: {}", request.model);
+
+    // Simple token estimation: ~4 characters per token
+    let mut total_chars = 0;
+
+    if let Some(system) = &request.system {
+        total_chars += system.len();
+    }
+
+    for msg in &request.messages {
+        match &msg.content {
+            AnthropicContent::Text(text) => {
+                total_chars += text.len();
+            }
+            AnthropicContent::Blocks(blocks) => {
+                for block in blocks {
+                    match block {
+                        AnthropicContentBlock::Text { text } => {
+                            total_chars += text.len();
+                        }
+                        AnthropicContentBlock::ToolUse { name, input, .. } => {
+                            total_chars += name.len();
+                            total_chars += input.to_string().len();
+                        }
+                        AnthropicContentBlock::ToolResult { content, .. } => {
+                            total_chars += content.len();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Add tool definitions
+    for tool in &request.tools {
+        total_chars += tool.name.len();
+        total_chars += tool.description.len();
+        total_chars += tool.input_schema.to_string().len();
+    }
+
+    let estimated_tokens = (total_chars / 4).max(1) as u32;
+
+    let response = AnthropicCountTokensResponse {
+        input_tokens: estimated_tokens,
+    };
+
+    info!("📊 Estimated {} input tokens", estimated_tokens);
+
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+/// Handler for /v1/models endpoint
+async fn models_handler(
+    State(state): State<Arc<ProxyState>>,
+) -> Response {
+    info!("📋 Received models list request");
+
+    let model_info = ModelInfo {
+        id: state.llm_model.clone(),
+        object: "model".to_string(),
+        created: 1677649963, // Static timestamp
+        owned_by: "drakeify".to_string(),
+    };
+
+    let response = ModelsResponse {
+        object: "list".to_string(),
+        data: vec![model_info],
+    };
+
+    (StatusCode::OK, Json(response)).into_response()
 }
 
 /// Handler for /v1/chat/completions endpoint

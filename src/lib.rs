@@ -186,7 +186,7 @@ impl DrakeifyConfig {
 
 // Default value functions
 fn default_system_prompt() -> String {
-    "You are a helpful AI assistant with access to tools and plugins. Be concise, accurate, and helpful.".to_string()
+    "You are a helpful AI assistant with access to tools. Be concise, accurate, and helpful.  Only call a tool if it is the best way to answer the question.".to_string()
 }
 
 fn default_proxy_port() -> u16 {
