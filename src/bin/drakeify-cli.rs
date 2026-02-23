@@ -78,6 +78,17 @@ enum Commands {
         package_type: String,
     },
 
+    /// Search for packages in the registry
+    Search {
+        /// Type of package (plugin or tool)
+        #[arg(short, long)]
+        package_type: String,
+
+        /// Search query
+        #[arg(short, long)]
+        query: String,
+    },
+
     /// Remove an installed plugin or tool
     Remove {
         /// Type of package (plugin or tool)
@@ -128,6 +139,9 @@ async fn main() -> Result<()> {
         }
         Some(Commands::List { package_type }) => {
             handle_list(&config, package_type).await
+        }
+        Some(Commands::Search { package_type, query }) => {
+            handle_search(&config, package_type, query).await
         }
         Some(Commands::Remove { package_type, name }) => {
             handle_remove(&config, package_type, name).await
@@ -283,6 +297,56 @@ async fn handle_list(
     Ok(())
 }
 
+/// Handle the search command
+async fn handle_search(
+    config: &DrakeifyConfig,
+    package_type: String,
+    query: String,
+) -> Result<()> {
+    let pkg_type = match package_type.to_lowercase().as_str() {
+        "plugin" => Some(PackageType::Plugin),
+        "tool" => Some(PackageType::Tool),
+        _ => return Err(anyhow::anyhow!("Invalid package type. Must be 'plugin' or 'tool'")),
+    };
+
+    let client = RegistryClient::new(
+        config.registry_url.clone(),
+        config.registry_username.clone(),
+        config.registry_password.clone(),
+        config.registry_insecure,
+    )?;
+
+    let packages = client.discover(pkg_type).await?;
+
+    if packages.is_empty() {
+        println!("No {}s found in registry", package_type);
+    } else {
+        // If query is "*", show all packages
+        let filtered: Vec<_> = if query == "*" {
+            packages.iter().collect()
+        } else {
+            packages.iter()
+                .filter(|p| p.to_lowercase().contains(&query.to_lowercase()))
+                .collect()
+        };
+
+        if filtered.is_empty() {
+            println!("No {}s found matching '{}'", package_type, query);
+        } else {
+            if query == "*" {
+                println!("Available {}s in registry:", package_type);
+            } else {
+                println!("Available {}s in registry matching '{}':", package_type, query);
+            }
+            for pkg in filtered {
+                println!("  📦 {}", pkg);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Handle the remove command
 async fn handle_remove(
     _config: &DrakeifyConfig,
@@ -425,9 +489,11 @@ async fn handle_slash_command(input: &str, config: &DrakeifyConfig) -> Result<bo
                         println!("Usage: /packages search <plugin|tool> <query>");
                         return Ok(true);
                     }
-                    // For now, search is the same as list
-                    println!("Searching for {}s matching '{}'...", parts[2], parts[3]);
-                    handle_list(config, parts[2].to_string()).await?;
+                    handle_search(
+                        config,
+                        parts[2].to_string(),
+                        parts[3].to_string(),
+                    ).await?;
                 }
                 _ => {
                     println!("Unknown packages command: {}", parts[1]);

@@ -291,6 +291,55 @@ impl RegistryClient {
         warn!("List operation not yet implemented for OCI registries");
         Ok(vec![])
     }
+
+    /// Discover available packages in the registry using the catalog endpoint
+    pub async fn discover(
+        &self,
+        package_type: Option<PackageType>,
+    ) -> Result<Vec<String>> {
+        // Use the OCI catalog endpoint to list repositories
+        let catalog_url = format!("{}/v2/_catalog", self.registry_url);
+
+        debug!("Fetching catalog from: {}", catalog_url);
+
+        let response = reqwest::get(&catalog_url)
+            .await
+            .with_context(|| format!("Failed to fetch catalog from {}", catalog_url))?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!("Failed to fetch catalog: HTTP {}", response.status()));
+        }
+
+        let catalog: serde_json::Value = response.json().await?;
+        let repositories = catalog["repositories"]
+            .as_array()
+            .ok_or_else(|| anyhow!("Invalid catalog response: missing 'repositories' array"))?;
+
+        let mut packages = Vec::new();
+
+        for repo in repositories {
+            let repo_name = repo.as_str()
+                .ok_or_else(|| anyhow!("Invalid repository name in catalog"))?;
+
+            // Filter by package type if specified
+            if let Some(ref pkg_type) = package_type {
+                let prefix = match pkg_type {
+                    PackageType::Plugin => "plugins/",
+                    PackageType::Tool => "tools/",
+                };
+
+                if repo_name.starts_with(prefix) {
+                    // Remove the prefix to get just the package name
+                    packages.push(repo_name.strip_prefix(prefix).unwrap().to_string());
+                }
+            } else {
+                // Return all packages with their type prefix
+                packages.push(repo_name.to_string());
+            }
+        }
+
+        Ok(packages)
+    }
 }
 
 
