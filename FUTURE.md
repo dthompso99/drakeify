@@ -14,6 +14,7 @@ The following is just a checklist of future plans, not in any particular order. 
    - allow for multiple identities to be used at once, and for them to be able to call each other
  - Multi-LLM support
    - allow for multiple LLMs to be used at once, and for them to be able to call each other
+   - seperate LLMs for images, audio, and text
  - Support for openai style api keys
    - use api keys to tie together identities
    - use api keys to track usage

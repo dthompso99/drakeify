@@ -243,6 +243,8 @@ enum StreamMessage {
     Error(String),
     /// Stream finished
     Done,
+    /// Stream finished with tool calls
+    DoneWithToolCalls,
 }
 
 /// Execute the tool loop with streaming updates
@@ -434,7 +436,18 @@ fn execute_tool_loop_streaming(
         // If there are client tools, return them to the client
         if !client_tool_calls.is_empty() {
             debug!("Returning {} client tool call(s) to client", client_tool_calls.len());
-            let _ = tx.send(StreamMessage::Error("Client tool calls not supported in streaming mode".to_string()));
+
+            // Send the content first
+            let _ = tx.send(StreamMessage::Content(final_content.clone()));
+
+            // Send tool calls
+            for tc in &client_tool_calls {
+                let args_json = serde_json::to_string(&tc.function.arguments).unwrap_or_default();
+                let _ = tx.send(StreamMessage::ToolCall(tc.function.name.clone(), args_json));
+            }
+
+            // Send done with tool calls
+            let _ = tx.send(StreamMessage::DoneWithToolCalls);
 
             // Add assistant message with client tool calls to conversation
             conversation_messages.push(OllamaMessage {
@@ -607,7 +620,8 @@ async fn handle_streaming_request(
                 Ok(Event::default().data(serde_json::to_string(&chunk).unwrap()))
             }
             StreamMessage::ToolCall(tool_name, args) => {
-                // Send tool call notification
+                // Send tool call in OpenAI streaming format
+                let tool_call_id = format!("call_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
                 let chunk = serde_json::json!({
                     "id": format!("chatcmpl-{}", chrono::Utc::now().timestamp()),
                     "object": "chat.completion.chunk",
@@ -615,7 +629,17 @@ async fn handle_streaming_request(
                     "model": model.clone(),
                     "choices": [{
                         "index": 0,
-                        "delta": {"thinking": format!("🔧 Executing tool: {}", tool_name)},
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": tool_call_id,
+                                "type": "function",
+                                "function": {
+                                    "name": tool_name,
+                                    "arguments": args
+                                }
+                            }]
+                        },
                         "finish_reason": null
                     }]
                 });
@@ -661,6 +685,21 @@ async fn handle_streaming_request(
                         "index": 0,
                         "delta": {},
                         "finish_reason": "stop"
+                    }]
+                });
+                Ok(Event::default().data(serde_json::to_string(&chunk).unwrap()))
+            }
+            StreamMessage::DoneWithToolCalls => {
+                // Send final done chunk with tool_calls finish reason
+                let chunk = serde_json::json!({
+                    "id": format!("chatcmpl-{}", chrono::Utc::now().timestamp()),
+                    "object": "chat.completion.chunk",
+                    "created": chrono::Utc::now().timestamp(),
+                    "model": model.clone(),
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "tool_calls"
                     }]
                 });
                 Ok(Event::default().data(serde_json::to_string(&chunk).unwrap()))

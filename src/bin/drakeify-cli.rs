@@ -687,7 +687,7 @@ async fn run_interactive_mode(config: &DrakeifyConfig) -> Result<()> {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
 
-        let response_json: serde_json::Value = if content_type.contains("text/event-stream") {
+        let (response_json, content_was_streamed) = if content_type.contains("text/event-stream") {
             // Handle SSE streaming response
             use futures_util::StreamExt;
             use colored::Colorize;
@@ -726,10 +726,20 @@ async fn run_interactive_mode(config: &DrakeifyConfig) -> Result<()> {
                                         std::io::stdout().flush()?;
                                         accumulated_content.push_str(content);
                                     }
-                                    // Check for tool calls in the chunk
-                                    if let Some(tc) = chunk_json["choices"][0]["message"]["tool_calls"].as_array() {
-                                        if !tc.is_empty() {
-                                            tool_calls_json = Some(chunk_json["choices"][0]["message"]["tool_calls"].clone());
+                                    // Handle tool calls in streaming delta
+                                    else if let Some(tc_array) = chunk_json["choices"][0]["delta"]["tool_calls"].as_array() {
+                                        if !tc_array.is_empty() {
+                                            // Initialize or append to tool_calls_json
+                                            if tool_calls_json.is_none() {
+                                                tool_calls_json = Some(serde_json::json!([]));
+                                            }
+                                            if let Some(calls) = tool_calls_json.as_mut() {
+                                                if let Some(calls_array) = calls.as_array_mut() {
+                                                    for tc in tc_array {
+                                                        calls_array.push(tc.clone());
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -746,17 +756,17 @@ async fn run_interactive_mode(config: &DrakeifyConfig) -> Result<()> {
             println!(); // New line after streaming
 
             // Construct a response JSON similar to non-streaming format
-            serde_json::json!({
+            (serde_json::json!({
                 "choices": [{
                     "message": {
                         "content": accumulated_content,
                         "tool_calls": tool_calls_json
                     }
                 }]
-            })
+            }), true)
         } else {
             // Handle non-streaming JSON response
-            response.json().await?
+            (response.json().await?, false)
         };
 
         // Extract assistant message from response
@@ -770,7 +780,10 @@ async fn run_interactive_mode(config: &DrakeifyConfig) -> Result<()> {
 
         if let Some(calls) = tool_calls {
             if !calls.is_empty() {
-                println!("{}\n", assistant_content);
+                // Only print content if it wasn't already streamed
+                if !content_was_streamed && !assistant_content.is_empty() {
+                    println!("{}\n", assistant_content);
+                }
 
                 // Add assistant message with tool calls to conversation
                 let assistant_message = OllamaMessage {
@@ -806,7 +819,10 @@ async fn run_interactive_mode(config: &DrakeifyConfig) -> Result<()> {
             }
         }
 
-        println!("{}\n", assistant_content);
+        // Only print content if it wasn't already streamed
+        if !content_was_streamed {
+            println!("{}\n", assistant_content);
+        }
 
         // Add assistant response to conversation
         let assistant_message = OllamaMessage {
