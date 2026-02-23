@@ -162,6 +162,24 @@ impl DrakeifyConfig {
         if let Ok(val) = env::var("DRAKEIFY_HTTP_MAX_RESPONSE_SIZE") {
             config.http_max_response_size = val.parse().unwrap_or(config.http_max_response_size);
         }
+        if let Ok(val) = env::var("DRAKEIFY_REGISTRY_URL") {
+            config.registry_url = val;
+        }
+        if let Ok(val) = env::var("DRAKEIFY_REGISTRY_USERNAME") {
+            config.registry_username = Some(val);
+        }
+        if let Ok(val) = env::var("DRAKEIFY_REGISTRY_PASSWORD") {
+            config.registry_password = Some(val);
+        }
+        if let Ok(val) = env::var("DRAKEIFY_REGISTRY_INSECURE") {
+            config.registry_insecure = val.parse().unwrap_or(config.registry_insecure);
+        }
+
+        // Apply defaults for empty string values
+        if config.registry_url.is_empty() {
+            config.registry_url = default_registry_url();
+        }
+
         Ok(config)
     }
 }

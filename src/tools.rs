@@ -69,13 +69,24 @@ impl ToolRegistry {
             let entry = entry?;
             let path = entry.path();
 
-            // Only process .js files
-            if path.extension().and_then(|s| s.to_str()) == Some("js") {
+            // Check if it's a .js file directly in the directory
+            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("js") {
                 let js_code = fs::read_to_string(&path)
                     .with_context(|| format!("Failed to read tool file: {:?}", path))?;
 
                 self.register_tool_from_js(&js_code)
                     .with_context(|| format!("Failed to register tool from: {:?}", path))?;
+            }
+            // Check if it's a directory with a tool.js file (installed package format)
+            else if path.is_dir() {
+                let tool_file = path.join("tool.js");
+                if tool_file.exists() {
+                    let js_code = fs::read_to_string(&tool_file)
+                        .with_context(|| format!("Failed to read tool file: {:?}", tool_file))?;
+
+                    self.register_tool_from_js(&js_code)
+                        .with_context(|| format!("Failed to register tool from: {:?}", tool_file))?;
+                }
             }
         }
 

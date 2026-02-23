@@ -189,14 +189,25 @@ impl RegistryClient {
             "tools"
         };
 
+        // Strip protocol from registry URL to get just the hostname
         let registry = self.registry_url
             .trim_start_matches("https://")
             .trim_start_matches("http://")
+            .trim_end_matches("/")
             .to_string();
+
+        if registry.is_empty() {
+            return Err(anyhow!("Registry URL is empty. Please set registry_url in drakeify.toml or DRAKEIFY_REGISTRY_URL environment variable"));
+        }
 
         let repository = format!("{}/{}", prefix, metadata.name);
 
+        debug!("Creating reference: registry={}, repository={}, tag={}", registry, repository, metadata.version);
+
         let reference = Reference::with_tag(registry, repository, metadata.version.clone());
+
+        debug!("Created reference: {}", reference);
+
         Ok(reference)
     }
 

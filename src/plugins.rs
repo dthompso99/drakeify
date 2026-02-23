@@ -71,7 +71,8 @@ impl PluginRegistry {
             let entry = entry?;
             let path = entry.path();
 
-            if path.extension().and_then(|s| s.to_str()) == Some("js") {
+            // Check if it's a .js file directly in the directory
+            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("js") {
                 let js_code = fs::read_to_string(&path)?;
                 match self.register_plugin_from_js(&js_code) {
                     Ok(true) => {
@@ -82,6 +83,24 @@ impl PluginRegistry {
                     }
                     Err(e) => {
                         warn!("✗ Failed to load plugin {}: {}", path.display(), e);
+                    }
+                }
+            }
+            // Check if it's a directory with a plugin.js file (installed package format)
+            else if path.is_dir() {
+                let plugin_file = path.join("plugin.js");
+                if plugin_file.exists() {
+                    let js_code = fs::read_to_string(&plugin_file)?;
+                    match self.register_plugin_from_js(&js_code) {
+                        Ok(true) => {
+                            info!("✓ Loaded plugin: {}", path.file_name().unwrap().to_string_lossy());
+                        }
+                        Ok(false) => {
+                            // Plugin was filtered out, don't log
+                        }
+                        Err(e) => {
+                            warn!("✗ Failed to load plugin {}: {}", plugin_file.display(), e);
+                        }
                     }
                 }
             }

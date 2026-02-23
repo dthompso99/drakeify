@@ -71,11 +71,22 @@ enum Commands {
         version: String,
     },
 
-    /// List available plugins or tools in the registry
+    /// List installed plugins or tools
     List {
         /// Type of package (plugin or tool)
         #[arg(short, long)]
         package_type: String,
+    },
+
+    /// Remove an installed plugin or tool
+    Remove {
+        /// Type of package (plugin or tool)
+        #[arg(short, long)]
+        package_type: String,
+
+        /// Package name
+        #[arg(short, long)]
+        name: String,
     },
 
     /// Execute a shell command (for k9s compatibility)
@@ -117,6 +128,9 @@ async fn main() -> Result<()> {
         }
         Some(Commands::List { package_type }) => {
             handle_list(&config, package_type).await
+        }
+        Some(Commands::Remove { package_type, name }) => {
+            handle_remove(&config, package_type, name).await
         }
         Some(Commands::ShellCommand { command }) => {
             handle_shell_command(&command).await
@@ -209,34 +223,106 @@ async fn handle_install(
     Ok(())
 }
 
-/// Handle the list command
+/// Handle the list command - lists locally installed packages
 async fn handle_list(
-    config: &DrakeifyConfig,
+    _config: &DrakeifyConfig,
     package_type: String,
 ) -> Result<()> {
+    use std::fs;
+    use std::path::Path;
+
     let pkg_type = match package_type.to_lowercase().as_str() {
         "plugin" => PackageType::Plugin,
         "tool" => PackageType::Tool,
         _ => return Err(anyhow::anyhow!("Invalid package type. Must be 'plugin' or 'tool'")),
     };
 
-    let mut client = RegistryClient::new(
-        config.registry_url.clone(),
-        config.registry_username.clone(),
-        config.registry_password.clone(),
-        config.registry_insecure,
-    )?;
-
-    let packages = client.list(pkg_type).await?;
-
-    if packages.is_empty() {
-        println!("No {}s found in registry", package_type);
+    let dir_name = if pkg_type == PackageType::Plugin {
+        "plugins"
     } else {
-        println!("Available {}s:", package_type);
-        for pkg in packages {
-            println!("  - {}", pkg);
+        "tools"
+    };
+
+    let dir_path = Path::new(dir_name);
+
+    if !dir_path.exists() {
+        println!("No {}s installed (directory {} does not exist)", package_type, dir_name);
+        return Ok(());
+    }
+
+    let mut packages = Vec::new();
+
+    for entry in fs::read_dir(dir_path)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path.is_dir() {
+            let metadata_file = path.join("metadata.json");
+            if metadata_file.exists() {
+                let metadata_content = fs::read_to_string(&metadata_file)?;
+                let metadata: PackageMetadata = serde_json::from_str(&metadata_content)?;
+                packages.push(metadata);
+            }
         }
     }
+
+    if packages.is_empty() {
+        println!("No {}s installed", package_type);
+    } else {
+        println!("Installed {}s:", package_type);
+        for pkg in packages {
+            println!("  📦 {} v{}", pkg.name, pkg.version);
+            println!("     {}", pkg.description);
+            if let Some(author) = pkg.author {
+                println!("     Author: {}", author);
+            }
+            println!();
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle the remove command
+async fn handle_remove(
+    _config: &DrakeifyConfig,
+    package_type: String,
+    name: String,
+) -> Result<()> {
+    use std::fs;
+    use std::path::Path;
+
+    let pkg_type = match package_type.to_lowercase().as_str() {
+        "plugin" => PackageType::Plugin,
+        "tool" => PackageType::Tool,
+        _ => return Err(anyhow::anyhow!("Invalid package type. Must be 'plugin' or 'tool'")),
+    };
+
+    let dir_name = if pkg_type == PackageType::Plugin {
+        "plugins"
+    } else {
+        "tools"
+    };
+
+    let package_path = Path::new(dir_name).join(&name);
+
+    if !package_path.exists() {
+        return Err(anyhow::anyhow!("{} '{}' is not installed", package_type, name));
+    }
+
+    // Read metadata before removing
+    let metadata_file = package_path.join("metadata.json");
+    let metadata: PackageMetadata = if metadata_file.exists() {
+        let metadata_content = fs::read_to_string(&metadata_file)?;
+        serde_json::from_str(&metadata_content)?
+    } else {
+        return Err(anyhow::anyhow!("Package metadata not found for '{}'", name));
+    };
+
+    // Remove the package directory
+    fs::remove_dir_all(&package_path)?;
+
+    println!("✓ Successfully removed {} '{}' v{}", package_type, name, metadata.version);
 
     Ok(())
 }
@@ -276,10 +362,11 @@ async fn handle_slash_command(input: &str, config: &DrakeifyConfig) -> Result<bo
     match parts[0] {
         "/packages" => {
             if parts.len() < 2 {
-                println!("Usage: /packages <ls|publish|install|search> [args...]");
+                println!("Usage: /packages <ls|publish|install|remove|search> [args...]");
                 println!("  /packages ls <plugin|tool>");
                 println!("  /packages publish <plugin|tool> <path> <name> <version> <description> [author] [license]");
                 println!("  /packages install <plugin|tool> <name> <version>");
+                println!("  /packages remove <plugin|tool> <name>");
                 println!("  /packages search <plugin|tool> <query>");
                 return Ok(true);
             }
@@ -322,6 +409,17 @@ async fn handle_slash_command(input: &str, config: &DrakeifyConfig) -> Result<bo
                         parts[4].to_string(),
                     ).await?;
                 }
+                "remove" | "rm" => {
+                    if parts.len() < 4 {
+                        println!("Usage: /packages remove <plugin|tool> <name>");
+                        return Ok(true);
+                    }
+                    handle_remove(
+                        config,
+                        parts[2].to_string(),
+                        parts[3].to_string(),
+                    ).await?;
+                }
                 "search" => {
                     if parts.len() < 4 {
                         println!("Usage: /packages search <plugin|tool> <query>");
@@ -333,16 +431,17 @@ async fn handle_slash_command(input: &str, config: &DrakeifyConfig) -> Result<bo
                 }
                 _ => {
                     println!("Unknown packages command: {}", parts[1]);
-                    println!("Available commands: ls, publish, install, search");
+                    println!("Available commands: ls, publish, install, remove, search");
                 }
             }
             Ok(true)
         }
         "/help" => {
             println!("\nAvailable slash commands:");
-            println!("  /packages ls <plugin|tool>                                    - List available packages");
+            println!("  /packages ls <plugin|tool>                                    - List installed packages");
             println!("  /packages publish <type> <path> <name> <ver> <desc> [author] - Publish a package");
             println!("  /packages install <plugin|tool> <name> <version>              - Install a package");
+            println!("  /packages remove <plugin|tool> <name>                         - Remove an installed package");
             println!("  /packages search <plugin|tool> <query>                        - Search for packages");
             println!("  /help                                                         - Show this help");
             println!("\nSlash commands are executed locally and do not go to the LLM.\n");
