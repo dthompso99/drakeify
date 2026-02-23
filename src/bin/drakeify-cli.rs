@@ -520,11 +520,61 @@ async fn handle_slash_command(input: &str, config: &DrakeifyConfig) -> Result<bo
     }
 }
 
+/// Load client tools that the CLI provides to the LLM
+fn load_client_tools() -> Result<Vec<serde_json::Value>> {
+    let package_manager_tool = include_str!("../../src/client_tools/package_manager.json");
+    let tool: serde_json::Value = serde_json::from_str(package_manager_tool)?;
+    Ok(vec![tool])
+}
+
+/// Execute a client tool call
+async fn execute_client_tool(
+    config: &DrakeifyConfig,
+    tool_name: &str,
+    arguments_str: &str,
+) -> Result<String> {
+    match tool_name {
+        "package_manager" => {
+            let args: serde_json::Value = serde_json::from_str(arguments_str)?;
+            let action = args["action"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'action' parameter"))?;
+            let package_type = args["package_type"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'package_type' parameter"))?;
+
+            match action {
+                "list" => {
+                    handle_list(config, package_type.to_string()).await?;
+                    Ok(format!("Listed installed {}s", package_type))
+                }
+                "search" => {
+                    let query = args["query"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'query' parameter"))?;
+                    handle_search(config, package_type.to_string(), query.to_string()).await?;
+                    Ok(format!("Searched for {}s matching '{}'", package_type, query))
+                }
+                "install" => {
+                    let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'name' parameter"))?;
+                    let version = args["version"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'version' parameter"))?;
+                    handle_install(config, package_type.to_string(), name.to_string(), version.to_string()).await?;
+                    Ok(format!("Installed {}/{} version {}", package_type, name, version))
+                }
+                "remove" => {
+                    let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'name' parameter"))?;
+                    handle_remove(config, package_type.to_string(), name.to_string()).await?;
+                    Ok(format!("Removed {}/{}", package_type, name))
+                }
+                _ => Err(anyhow::anyhow!("Unknown action: {}", action))
+            }
+        }
+        _ => Err(anyhow::anyhow!("Unknown tool: {}", tool_name))
+    }
+}
+
 /// Run interactive chat mode - acts as a pure HTTP client to the proxy
 async fn run_interactive_mode(config: &DrakeifyConfig) -> Result<()> {
     info!("🤖 Drakeify Interactive Mode");
     info!("Connecting to proxy at http://{}:{}", config.proxy_host, config.proxy_port);
     info!("Type 'exit' or 'quit' to end the conversation\n");
+
+    // Load client tools
+    let client_tools = load_client_tools()?;
 
     // Initialize session manager
     let mut session_manager = SessionManager::new(&config.sessions_dir, config.auto_save)?;
@@ -614,6 +664,7 @@ async fn run_interactive_mode(config: &DrakeifyConfig) -> Result<()> {
         let request_body = serde_json::json!({
             "model": config.llm_model.clone(),
             "messages": conversation_messages,
+            "tools": client_tools,
             "stream": false,
         });
 
@@ -637,6 +688,47 @@ async fn run_interactive_mode(config: &DrakeifyConfig) -> Result<()> {
             .as_str()
             .unwrap_or("(no response)")
             .to_string();
+
+        // Check if there are tool calls
+        let tool_calls = response_json["choices"][0]["message"]["tool_calls"].as_array();
+
+        if let Some(calls) = tool_calls {
+            if !calls.is_empty() {
+                println!("{}\n", assistant_content);
+
+                // Add assistant message with tool calls to conversation
+                let assistant_message = OllamaMessage {
+                    role: "assistant".to_string(),
+                    content: assistant_content.clone(),
+                    tool_calls: vec![], // We'll handle tool calls separately
+                };
+                conversation_messages.push(assistant_message);
+
+                // Execute each tool call
+                for call in calls {
+                    let tool_name = call["function"]["name"].as_str().unwrap_or("");
+                    let arguments_str = call["function"]["arguments"].as_str().unwrap_or("{}");
+
+                    println!("🔧 Executing tool: {}", tool_name);
+
+                    // Execute the tool and get result
+                    let result = execute_client_tool(config, tool_name, arguments_str).await?;
+
+                    println!("✅ Tool result: {}\n", result);
+
+                    // Add tool result to conversation
+                    let tool_message = OllamaMessage {
+                        role: "tool".to_string(),
+                        content: result,
+                        tool_calls: vec![],
+                    };
+                    conversation_messages.push(tool_message);
+                }
+
+                // Continue the loop to get the next response from the LLM
+                continue;
+            }
+        }
 
         println!("{}\n", assistant_content);
 

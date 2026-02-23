@@ -3,8 +3,6 @@ The following is just a checklist of future plans, not in any particular order. 
 ## Future Plans
  - Remote Agent Support
    - allow tools to run on remote systems, and register themselves with drakeify
- - Tool / Plugin Management
-   - create a platform to discover, install, update, and manage tools and plugins
  - Micro LLM support
    - embed a small LLM to handle simple tasks, and expose it to the plugin ecosystem.
  - Cron Support

@@ -1,0 +1,36 @@
+{
+  "type": "function",
+  "function": {
+    "name": "package_manager",
+    "description": "Manage drakeify packages (plugins and tools). Can list installed packages, search the registry, install packages, and remove packages.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": ["list", "search", "install", "remove"],
+          "description": "The action to perform: 'list' shows installed packages, 'search' finds packages in registry, 'install' installs a package, 'remove' uninstalls a package"
+        },
+        "package_type": {
+          "type": "string",
+          "enum": ["plugin", "tool"],
+          "description": "Type of package: 'plugin' or 'tool'"
+        },
+        "name": {
+          "type": "string",
+          "description": "Package name (required for install and remove actions)"
+        },
+        "version": {
+          "type": "string",
+          "description": "Package version (required for install action)"
+        },
+        "query": {
+          "type": "string",
+          "description": "Search query (required for search action, use '*' to list all packages)"
+        }
+      },
+      "required": ["action", "package_type"]
+    }
+  }
+}
+
