@@ -934,6 +934,11 @@ async fn anthropic_messages_handler(
     Json(request): Json<AnthropicMessagesRequest>,
 ) -> Response {
     info!("📨 Received Anthropic Messages API request for model: {}", request.model);
+    info!("   Anthropic tools count: {}", request.tools.len());
+    for tool in &request.tools {
+        info!("   - Tool: {} ({})", tool.name, tool.description);
+        debug!("     Schema: {:?}", tool.input_schema);
+    }
 
     // Convert Anthropic format to OpenAI format
     let openai_request = anthropic_to_openai(request);
