@@ -18,6 +18,14 @@ use tokio_stream::StreamExt;
 use crate::llm::{OllamaMessage, OllamaRequest, OllamaOptions, OllamaFunction, OllamaToolCall, OllamaFunctionCall, LlmConfig};
 use crate::js_runtime::JsRuntimeConfig;
 
+/// Anthropic system prompt can be string or array of content blocks
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AnthropicSystem {
+    Text(String),
+    Blocks(Vec<AnthropicContentBlock>),
+}
+
 /// Anthropic Messages API request
 #[derive(Debug, Deserialize)]
 pub struct AnthropicMessagesRequest {
@@ -32,7 +40,7 @@ pub struct AnthropicMessagesRequest {
     #[serde(default)]
     pub temperature: Option<f32>,
     #[serde(default)]
-    pub system: Option<String>,
+    pub system: Option<AnthropicSystem>,
 }
 
 /// Anthropic message format
@@ -102,7 +110,7 @@ pub struct AnthropicCountTokensRequest {
     pub model: String,
     pub messages: Vec<AnthropicMessage>,
     #[serde(default)]
-    pub system: Option<String>,
+    pub system: Option<AnthropicSystem>,
     #[serde(default)]
     pub tools: Vec<AnthropicTool>,
 }
@@ -222,9 +230,23 @@ fn anthropic_to_openai(anthropic_req: AnthropicMessagesRequest) -> ChatCompletio
 
     // Add system message if present
     if let Some(system) = anthropic_req.system {
+        let system_text = match system {
+            AnthropicSystem::Text(text) => text,
+            AnthropicSystem::Blocks(blocks) => {
+                // Extract text from blocks
+                blocks.iter()
+                    .filter_map(|block| match block {
+                        AnthropicContentBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        };
+
         openai_messages.push(ChatMessage {
             role: "system".to_string(),
-            content: Some(system),
+            content: Some(system_text),
             tool_calls: None,
             tool_call_id: None,
         });
@@ -935,7 +957,21 @@ async fn anthropic_count_tokens_handler(
     let mut total_chars = 0;
 
     if let Some(system) = &request.system {
-        total_chars += system.len();
+        match system {
+            AnthropicSystem::Text(text) => {
+                total_chars += text.len();
+            }
+            AnthropicSystem::Blocks(blocks) => {
+                for block in blocks {
+                    match block {
+                        AnthropicContentBlock::Text { text } => {
+                            total_chars += text.len();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
     }
 
     for msg in &request.messages {
