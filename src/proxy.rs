@@ -152,11 +152,55 @@ pub struct ChatCompletionRequest {
     pub max_tokens: Option<u32>,
 }
 
+/// OpenAI message content can be string or array of content parts
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MessageContent {
+    Text(String),
+    Parts(Vec<ContentPart>),
+}
+
+impl MessageContent {
+    /// Extract text from content, joining multiple parts if needed
+    pub fn to_text(&self) -> String {
+        match self {
+            MessageContent::Text(text) => text.clone(),
+            MessageContent::Parts(parts) => {
+                parts.iter()
+                    .filter_map(|part| match part {
+                        ContentPart::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
+    }
+}
+
+/// OpenAI content part (for multimodal messages)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ContentPart {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: ImageUrl },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageUrl {
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 /// OpenAI-compatible chat message
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
-    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<MessageContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -246,7 +290,7 @@ fn anthropic_to_openai(anthropic_req: AnthropicMessagesRequest) -> ChatCompletio
 
         openai_messages.push(ChatMessage {
             role: "system".to_string(),
-            content: Some(system_text),
+            content: Some(MessageContent::Text(system_text)),
             tool_calls: None,
             tool_call_id: None,
         });
@@ -255,7 +299,7 @@ fn anthropic_to_openai(anthropic_req: AnthropicMessagesRequest) -> ChatCompletio
     // Convert messages
     for msg in anthropic_req.messages {
         let content = match msg.content {
-            AnthropicContent::Text(text) => Some(text),
+            AnthropicContent::Text(text) => Some(MessageContent::Text(text)),
             AnthropicContent::Blocks(blocks) => {
                 // Extract text from blocks
                 let text: String = blocks.iter()
@@ -265,7 +309,7 @@ fn anthropic_to_openai(anthropic_req: AnthropicMessagesRequest) -> ChatCompletio
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                Some(text)
+                Some(MessageContent::Text(text))
             }
         };
 
@@ -303,7 +347,7 @@ fn anthropic_to_openai(anthropic_req: AnthropicMessagesRequest) -> ChatCompletio
 fn openai_to_anthropic(openai_resp: ChatCompletionResponse) -> AnthropicMessagesResponse {
     let choice = &openai_resp.choices[0];
     let content = vec![AnthropicContentBlock::Text {
-        text: choice.message.content.clone().unwrap_or_default(),
+        text: choice.message.content.as_ref().map(|c| c.to_text()).unwrap_or_default(),
     }];
 
     AnthropicMessagesResponse {
@@ -737,7 +781,7 @@ async fn handle_streaming_request(
         let mut conversation_messages: Vec<OllamaMessage> = request.messages.iter().map(|msg| {
             OllamaMessage {
                 role: msg.role.clone(),
-                content: msg.content.clone().unwrap_or_default(),
+                content: msg.content.as_ref().map(|c| c.to_text()).unwrap_or_default(),
                 tool_calls: vec![],
             }
         }).collect();
@@ -934,11 +978,6 @@ async fn anthropic_messages_handler(
     Json(request): Json<AnthropicMessagesRequest>,
 ) -> Response {
     info!("📨 Received Anthropic Messages API request for model: {}", request.model);
-    info!("   Anthropic tools count: {}", request.tools.len());
-    for tool in &request.tools {
-        info!("   - Tool: {} ({})", tool.name, tool.description);
-        debug!("     Schema: {:?}", tool.input_schema);
-    }
 
     // Convert Anthropic format to OpenAI format
     let openai_request = anthropic_to_openai(request);
@@ -1057,7 +1096,7 @@ async fn chat_completions_handler(
                 i + 1,
                 msg.role,
                 msg.tool_call_id,
-                msg.content.as_ref().map(|c| c.len()).unwrap_or(0)
+                msg.content.as_ref().map(|c| c.to_text().len()).unwrap_or(0)
             );
         }
     }
@@ -1093,7 +1132,7 @@ async fn chat_completions_handler(
     let mut conversation_messages: Vec<OllamaMessage> = request.messages.iter().map(|msg| {
         OllamaMessage {
             role: msg.role.clone(),
-            content: msg.content.clone().unwrap_or_default(),
+            content: msg.content.as_ref().map(|c| c.to_text()).unwrap_or_default(),
             tool_calls: vec![], // Will be populated by LLM responses
         }
     }).collect();
@@ -1150,7 +1189,7 @@ async fn chat_completions_handler(
                     index: 0,
                     message: ChatMessage {
                         role: "assistant".to_string(),
-                        content: Some(final_content),
+                        content: Some(MessageContent::Text(final_content)),
                         tool_calls: None,
                         tool_call_id: None,
                     },
@@ -1187,7 +1226,7 @@ async fn chat_completions_handler(
                     index: 0,
                     message: ChatMessage {
                         role: "assistant".to_string(),
-                        content: Some(content.clone()),
+                        content: Some(MessageContent::Text(content.clone())),
                         tool_calls: Some(openai_tool_calls.clone()),
                         tool_call_id: None,
                     },
@@ -1215,7 +1254,7 @@ async fn chat_completions_handler(
                             index: 0,
                             message: ChatMessage {
                                 role: "assistant".to_string(),
-                                content: Some(format!("Error: Failed to serialize tool calls: {}", e)),
+                                content: Some(MessageContent::Text(format!("Error: Failed to serialize tool calls: {}", e))),
                                 tool_calls: None,
                                 tool_call_id: None,
                             },
@@ -1236,7 +1275,7 @@ async fn chat_completions_handler(
                     index: 0,
                     message: ChatMessage {
                         role: "assistant".to_string(),
-                        content: Some(format!("Error: {}", e)),
+                        content: Some(MessageContent::Text(format!("Error: {}", e))),
                         tool_calls: None,
                         tool_call_id: None,
                     },
@@ -1255,7 +1294,7 @@ async fn chat_completions_handler(
                     index: 0,
                     message: ChatMessage {
                         role: "assistant".to_string(),
-                        content: Some(format!("Internal error: {}", e)),
+                        content: Some(MessageContent::Text(format!("Internal error: {}", e))),
                         tool_calls: None,
                         tool_call_id: None,
                     },
