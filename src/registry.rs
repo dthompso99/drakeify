@@ -32,6 +32,8 @@ pub struct PackageMetadata {
     #[serde(default)]
     pub tags: Vec<String>,
     pub created: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_config: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -238,6 +240,7 @@ impl RegistryClient {
             drakeify_version: None,
             tags: vec![],
             created: String::new(),
+            default_config: None,
         };
 
         let reference = self.create_reference(&metadata)?;

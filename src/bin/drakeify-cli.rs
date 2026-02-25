@@ -5,7 +5,7 @@
 // - Plugin/tool installation
 // - Shell compatibility for k9s
 
-use anyhow::Result;
+use anyhow::{Result, Context};
 use clap::{Parser, Subcommand};
 use drakeify::*;
 use tracing::{info, warn};
@@ -127,6 +127,34 @@ enum Commands {
 
     /// List all secret keys (values are not shown)
     ListSecrets,
+
+    /// Set a config value (JSON blob)
+    SetConfig {
+        /// Config scope (e.g., "plugin.my_plugin" or "tool.my_tool")
+        #[arg(short, long)]
+        scope: String,
+
+        /// Config value (JSON string)
+        #[arg(short, long)]
+        value: String,
+    },
+
+    /// Get a config value
+    GetConfig {
+        /// Config scope to retrieve
+        #[arg(short, long)]
+        scope: String,
+    },
+
+    /// Delete a config
+    DeleteConfig {
+        /// Config scope to delete
+        #[arg(short, long)]
+        scope: String,
+    },
+
+    /// List all config scopes
+    ListConfigs,
 }
 
 #[tokio::main]
@@ -183,6 +211,18 @@ async fn main() -> Result<()> {
         Some(Commands::ListSecrets) => {
             handle_list_secrets(&db).await
         }
+        Some(Commands::SetConfig { scope, value }) => {
+            handle_set_config(&db, scope, value).await
+        }
+        Some(Commands::GetConfig { scope }) => {
+            handle_get_config(&db, scope).await
+        }
+        Some(Commands::DeleteConfig { scope }) => {
+            handle_delete_config(&db, scope).await
+        }
+        Some(Commands::ListConfigs) => {
+            handle_list_configs(&db).await
+        }
         Some(Commands::Chat) | None => {
             run_interactive_mode(&config).await
         }
@@ -206,6 +246,19 @@ async fn handle_publish(
         _ => return Err(anyhow::anyhow!("Invalid package type. Must be 'plugin' or 'tool'")),
     };
 
+    let package_path = std::path::PathBuf::from(&path);
+
+    // Check if metadata.json exists in the package directory
+    let metadata_file = package_path.join("metadata.json");
+    let default_config = if metadata_file.exists() {
+        // Read existing metadata to preserve default_config
+        let metadata_content = std::fs::read_to_string(&metadata_file)?;
+        let existing_metadata: PackageMetadata = serde_json::from_str(&metadata_content)?;
+        existing_metadata.default_config
+    } else {
+        None
+    };
+
     let metadata = PackageMetadata {
         package_type: pkg_type,
         name: name.clone(),
@@ -218,6 +271,7 @@ async fn handle_publish(
         drakeify_version: Some(">=0.1.0".to_string()),
         tags: vec![],
         created: chrono::Utc::now().to_rfc3339(),
+        default_config,
     };
 
     let mut client = RegistryClient::new(
@@ -227,7 +281,6 @@ async fn handle_publish(
         config.registry_insecure,
     )?;
 
-    let package_path = std::path::PathBuf::from(path);
     client.publish(&package_path, metadata).await?;
 
     println!("✓ Successfully published {}/{} version {}", package_type, name, version);
@@ -260,12 +313,35 @@ async fn handle_install(
         config.registry_insecure,
     )?;
 
-    let metadata = client.install(pkg_type, &name, &version, &install_dir).await?;
+    let metadata = client.install(pkg_type.clone(), &name, &version, &install_dir).await?;
 
     println!("✓ Successfully installed {}/{} version {}", package_type, name, metadata.version);
     println!("  Description: {}", metadata.description);
-    if let Some(author) = metadata.author {
+    if let Some(author) = &metadata.author {
         println!("  Author: {}", author);
+    }
+
+    // If the package has a default_config, automatically install it
+    if let Some(default_config) = &metadata.default_config {
+        info!("Package has default_config, installing automatically");
+
+        // Connect to database
+        let db = Database::connect(&config.database_url).await?;
+        db.migrate().await?;
+
+        // Determine the config scope based on package type
+        let scope = match pkg_type {
+            PackageType::Plugin => format!("plugin.{}", name),
+            PackageType::Tool => format!("tool.{}", name),
+        };
+
+        // Convert the default_config to a JSON string
+        let config_json = serde_json::to_string(default_config)?;
+
+        // Set the config
+        db.set_plugin_config(&scope, &config_json).await?;
+
+        println!("  ✓ Installed default configuration for scope: {}", scope);
     }
 
     Ok(())
@@ -574,6 +650,54 @@ async fn handle_slash_command(input: &str, config: &DrakeifyConfig) -> Result<bo
             }
             Ok(true)
         }
+        "/config" | "/configs" => {
+            if parts.len() < 2 {
+                println!("Usage: /config <list|get|set|delete> [args...]");
+                println!("  /config list                   - List all config scopes");
+                println!("  /config get <scope>            - Get config for a scope");
+                println!("  /config set <scope> <json>     - Set config (JSON value)");
+                println!("  /config delete <scope>         - Delete a config");
+                return Ok(true);
+            }
+
+            // Initialize database for config operations
+            let db = Database::connect(&config.database_url).await?;
+            db.migrate().await?;
+
+            match parts[1] {
+                "list" | "ls" => {
+                    handle_list_configs(&db).await?;
+                }
+                "get" => {
+                    if parts.len() < 3 {
+                        println!("Usage: /config get <scope>");
+                        return Ok(true);
+                    }
+                    handle_get_config(&db, parts[2].to_string()).await?;
+                }
+                "set" => {
+                    if parts.len() < 4 {
+                        println!("Usage: /config set <scope> <json>");
+                        return Ok(true);
+                    }
+                    // Join remaining parts as the JSON value (in case it has spaces)
+                    let json_value = parts[3..].join(" ");
+                    handle_set_config(&db, parts[2].to_string(), json_value).await?;
+                }
+                "delete" | "del" | "rm" => {
+                    if parts.len() < 3 {
+                        println!("Usage: /config delete <scope>");
+                        return Ok(true);
+                    }
+                    handle_delete_config(&db, parts[2].to_string()).await?;
+                }
+                _ => {
+                    println!("Unknown config command: {}", parts[1]);
+                    println!("Available commands: list, get, set, delete");
+                }
+            }
+            Ok(true)
+        }
         "/help" => {
             println!("\nAvailable slash commands:");
             println!("  /packages ls <plugin|tool>                                    - List installed packages");
@@ -584,6 +708,10 @@ async fn handle_slash_command(input: &str, config: &DrakeifyConfig) -> Result<bo
             println!("  /secrets list                                                 - List all secret keys");
             println!("  /secrets set <key> <value>                                    - Set a secret value");
             println!("  /secrets delete <key>                                         - Delete a secret");
+            println!("  /config list                                                  - List all config scopes");
+            println!("  /config get <scope>                                           - Get config for a scope");
+            println!("  /config set <scope> <json>                                    - Set config (JSON value)");
+            println!("  /config delete <scope>                                        - Delete a config");
             println!("  /help                                                         - Show this help");
             println!("\nSlash commands are executed locally and do not go to the LLM.\n");
             Ok(true)
@@ -981,6 +1109,87 @@ async fn handle_list_secrets(db: &Database) -> Result<()> {
         println!(
             "{:<40} {:<25} {:<25}",
             key,
+            created_at,
+            updated_at
+        );
+    }
+
+    println!();
+    Ok(())
+}
+
+/// Handle the set-config command
+async fn handle_set_config(db: &Database, scope: String, value: String) -> Result<()> {
+    info!("Setting config for scope: {}", scope);
+
+    // Validate that the value is valid JSON
+    let _: serde_json::Value = serde_json::from_str(&value)
+        .context("Config value must be valid JSON")?;
+
+    db.set_plugin_config(&scope, &value).await?;
+    println!("✅ Config for '{}' has been set", scope);
+    Ok(())
+}
+
+/// Handle the get-config command
+async fn handle_get_config(db: &Database, scope: String) -> Result<()> {
+    info!("Getting config for scope: {}", scope);
+
+    match db.get_plugin_config(&scope).await? {
+        Some(config) => {
+            println!("\n📋 Config for '{}':", scope);
+            // Pretty print the JSON
+            let json: serde_json::Value = serde_json::from_str(&config)?;
+            println!("{}", serde_json::to_string_pretty(&json)?);
+            println!();
+        }
+        None => {
+            println!("No config found for scope: {}", scope);
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle the delete-config command
+async fn handle_delete_config(db: &Database, scope: String) -> Result<()> {
+    info!("Deleting config for scope: {}", scope);
+    db.delete_plugin_config(&scope).await?;
+    println!("✅ Config for '{}' has been deleted", scope);
+    Ok(())
+}
+
+/// Handle the list-configs command
+async fn handle_list_configs(db: &Database) -> Result<()> {
+    info!("Listing all config scopes");
+
+    // Get all configs
+    let configs: Vec<(String, String, String)> = match db {
+        Database::Sqlite(pool) => {
+            sqlx::query_as("SELECT plugin_name, created_at, updated_at FROM plugin_configs ORDER BY plugin_name")
+                .fetch_all(pool)
+                .await?
+        }
+        Database::Postgres(pool) => {
+            sqlx::query_as("SELECT plugin_name, created_at, updated_at FROM plugin_configs ORDER BY plugin_name")
+                .fetch_all(pool)
+                .await?
+        }
+    };
+
+    if configs.is_empty() {
+        println!("No configs found");
+        return Ok(());
+    }
+
+    println!("\n📋 Configs:");
+    println!("{:<40} {:<25} {:<25}", "Scope", "Created", "Updated");
+    println!("{}", "-".repeat(90));
+
+    for (scope, created_at, updated_at) in configs {
+        println!(
+            "{:<40} {:<25} {:<25}",
+            scope,
             created_at,
             updated_at
         );

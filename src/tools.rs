@@ -415,6 +415,38 @@ impl ToolRegistry {
             })?;
         }
 
+        // Inject get_config function if database is available
+        if let Some(ref db) = self.database {
+            ctx.with(|ctx| {
+                let database_clone = db.clone();
+                let get_config_fn = Function::new(ctx.clone(), move |scope: String| -> String {
+                    // Use blocking call to get config from database
+                    if let Some(h) = tokio::runtime::Handle::try_current().ok() {
+                        let db_clone = database_clone.clone();
+                        let config_json = h.block_on(async move {
+                            match db_clone.get_plugin_config(&scope).await {
+                                Ok(Some(config)) => config,
+                                Ok(None) => {
+                                    warn!("Config not found for scope: {}", scope);
+                                    "{}".to_string()
+                                }
+                                Err(e) => {
+                                    warn!("Failed to get config for scope {}: {}", scope, e);
+                                    "{}".to_string()
+                                }
+                            }
+                        });
+                        config_json
+                    } else {
+                        warn!("No tokio runtime available for get_config");
+                        "{}".to_string()
+                    }
+                })?;
+                ctx.globals().set("__rust_get_config", get_config_fn)?;
+                Ok::<(), anyhow::Error>(())
+            })?;
+        }
+
         ctx.with(|ctx| {
             // Evaluate the tool code to get the tool object
             let tool_obj: Object = ctx.eval(js_code.as_bytes())?;

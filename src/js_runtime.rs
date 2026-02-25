@@ -567,6 +567,22 @@ fn setup_http_fetch(ctx: &rquickjs::Ctx, _config: &JsRuntimeConfig) -> Result<()
                 return { success: false, data: null, error: String(e) };
             }
         };
+
+        // Placeholder for get_config - will be replaced by Rust if database is available
+        globalThis.__rust_get_config = function(scope) {
+            return '{}';
+        };
+
+        // Config getter function
+        globalThis.get_config = function(scope) {
+            try {
+                var configJson = __rust_get_config(scope);
+                return JSON.parse(configJson);
+            } catch (e) {
+                console.error('Failed to parse config for scope:', scope, e);
+                return {};
+            }
+        };
     "#;
     let _: rquickjs::Value = ctx.eval(http_code.as_bytes())?;
 
