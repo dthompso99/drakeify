@@ -8,6 +8,37 @@ use std::rc::Rc;
 use tracing::{info, warn};
 
 use crate::js_runtime::{JsRuntimeConfig, setup_js_globals, http_get_sync, http_post_sync, http_request_sync, HttpRequestOptions};
+use crate::database::Database;
+use std::collections::HashMap;
+
+/// Interpolate secrets in a string (synchronous version for use in closures)
+/// Replaces ${secret.scope.name} with the actual secret value from the database
+async fn interpolate_secrets_sync(text: &str, database: &Database) -> String {
+    let mut result = text.to_string();
+
+    // Find all ${secret.scope.name} patterns
+    let re = regex::Regex::new(r"\$\{secret\.([^}]+)\}").unwrap();
+
+    for cap in re.captures_iter(text) {
+        let full_match = &cap[0];
+        let secret_key = &cap[1];
+
+        // Get the secret value from database
+        match database.get_secret(secret_key).await {
+            Ok(Some(value)) => {
+                result = result.replace(full_match, &value);
+            }
+            Ok(None) => {
+                warn!("Secret not found: {}", secret_key);
+            }
+            Err(e) => {
+                warn!("Failed to get secret {}: {}", secret_key, e);
+            }
+        }
+    }
+
+    result
+}
 
 #[derive(Debug, Clone)]
 pub struct Plugin {
@@ -24,10 +55,11 @@ pub struct PluginRegistry {
     config: JsRuntimeConfig,
     enabled_plugins: Option<Vec<String>>,
     disabled_plugins: Option<Vec<String>>,
+    database: Option<std::sync::Arc<Database>>,
 }
 
 impl PluginRegistry {
-    pub fn new(config: JsRuntimeConfig, enabled_plugins: Option<Vec<String>>, disabled_plugins: Option<Vec<String>>) -> Result<Self> {
+    pub fn new(config: JsRuntimeConfig, enabled_plugins: Option<Vec<String>>, disabled_plugins: Option<Vec<String>>, database: Option<std::sync::Arc<Database>>) -> Result<Self> {
         let runtime = Runtime::new()?;
 
         // Setup globals in the runtime
@@ -40,6 +72,7 @@ impl PluginRegistry {
             config,
             enabled_plugins,
             disabled_plugins,
+            database,
         })
     }
 
@@ -198,8 +231,22 @@ impl PluginRegistry {
             ctx.with(|ctx| {
                 // Legacy GET function
                 let config_clone = self.config.clone();
+                let database_clone = self.database.clone();
                 let http_get_fn = Function::new(ctx.clone(), move |url: String| -> String {
-                    match http_get_sync(url, &config_clone) {
+                    let mut final_url = url;
+
+                    // Interpolate secrets if database is available
+                    if let Some(ref db) = database_clone {
+                        if let Some(h) = tokio::runtime::Handle::try_current().ok() {
+                            let db_clone = db.clone();
+                            let url_clone = final_url.clone();
+                            final_url = h.block_on(async move {
+                                interpolate_secrets_sync(&url_clone, &db_clone).await
+                            });
+                        }
+                    }
+
+                    match http_get_sync(final_url, &config_clone) {
                         Ok(data) => data,
                         Err(e) => {
                             format!("ERROR: {}", e)
@@ -210,8 +257,29 @@ impl PluginRegistry {
 
                 // Legacy POST function
                 let config_clone2 = self.config.clone();
+                let database_clone2 = self.database.clone();
                 let http_post_fn = Function::new(ctx.clone(), move |url: String, body: String| -> String {
-                    match http_post_sync(url, body, &config_clone2) {
+                    let mut final_url = url;
+                    let mut final_body = body;
+
+                    // Interpolate secrets if database is available
+                    if let Some(ref db) = database_clone2 {
+                        if let Some(h) = tokio::runtime::Handle::try_current().ok() {
+                            let db_clone = db.clone();
+                            let url_clone = final_url.clone();
+                            final_url = h.block_on(async move {
+                                interpolate_secrets_sync(&url_clone, &db_clone).await
+                            });
+
+                            let db_clone2 = db.clone();
+                            let body_clone = final_body.clone();
+                            final_body = h.block_on(async move {
+                                interpolate_secrets_sync(&body_clone, &db_clone2).await
+                            });
+                        }
+                    }
+
+                    match http_post_sync(final_url, final_body, &config_clone2) {
                         Ok(data) => data,
                         Err(e) => {
                             format!("ERROR: {}", e)
@@ -222,6 +290,7 @@ impl PluginRegistry {
 
                 // Comprehensive HTTP request function
                 let config_clone3 = self.config.clone();
+                let database_clone = self.database.clone();
                 let http_request_fn = Function::new(ctx.clone(), move |options_json: String| -> String {
                     // Parse options from JSON
                     let options_value: serde_json::Value = match serde_json::from_str(&options_json) {
@@ -239,26 +308,64 @@ impl PluginRegistry {
                     };
 
                     // Build HttpRequestOptions
+                    let mut url = options_value.get("url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let mut headers: HashMap<String, String> = options_value.get("headers")
+                        .and_then(|v| v.as_object())
+                        .map(|obj| {
+                            obj.iter()
+                                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let mut body = options_value.get("body")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+
+                    // Interpolate secrets if database is available
+                    if let Some(ref db) = database_clone {
+                        // Use blocking call to interpolate secrets
+                        let handle = tokio::runtime::Handle::try_current().ok();
+                        if let Some(h) = handle {
+                            let db_clone = db.clone();
+                            let url_clone = url.clone();
+                            url = h.block_on(async move {
+                                interpolate_secrets_sync(&url_clone, &db_clone).await
+                            });
+
+                            // Interpolate in headers
+                            let headers_clone = headers.clone();
+                            let db_clone2 = db.clone();
+                            headers = h.block_on(async move {
+                                let mut result = HashMap::new();
+                                for (k, v) in headers_clone {
+                                    let interpolated = interpolate_secrets_sync(&v, &db_clone2).await;
+                                    result.insert(k, interpolated);
+                                }
+                                result
+                            });
+
+                            // Interpolate in body
+                            if let Some(ref b) = body {
+                                let body_clone = b.clone();
+                                let db_clone3 = db.clone();
+                                body = Some(h.block_on(async move {
+                                    interpolate_secrets_sync(&body_clone, &db_clone3).await
+                                }));
+                            }
+                        }
+                    }
+
                     let options = HttpRequestOptions {
                         method: options_value.get("method")
                             .and_then(|v| v.as_str())
                             .unwrap_or("GET")
                             .to_string(),
-                        url: options_value.get("url")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        headers: options_value.get("headers")
-                            .and_then(|v| v.as_object())
-                            .map(|obj| {
-                                obj.iter()
-                                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                                    .collect()
-                            })
-                            .unwrap_or_default(),
-                        body: options_value.get("body")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string()),
+                        url,
+                        headers,
+                        body,
                         timeout_secs: options_value.get("timeout")
                             .and_then(|v| v.as_u64()),
                         parse_json: options_value.get("parseJson")

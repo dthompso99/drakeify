@@ -106,6 +106,27 @@ enum Commands {
         /// Command to execute
         command: String,
     },
+
+    /// Set a secret value
+    SetSecret {
+        /// Secret key (e.g., "api.github_token")
+        #[arg(short, long)]
+        key: String,
+
+        /// Secret value
+        #[arg(short, long)]
+        value: String,
+    },
+
+    /// Delete a secret
+    DeleteSecret {
+        /// Secret key to delete
+        #[arg(short, long)]
+        key: String,
+    },
+
+    /// List all secret keys (values are not shown)
+    ListSecrets,
 }
 
 #[tokio::main]
@@ -129,6 +150,10 @@ async fn main() -> Result<()> {
     // Initialize logging
     init_logging(&config)?;
 
+    // Initialize database for secret management commands
+    let db = Database::connect(&config.database_url).await?;
+    db.migrate().await?;
+
     // Handle CLI commands
     match cli.command {
         Some(Commands::Publish { package_type, path, name, version, description, author, license }) => {
@@ -148,6 +173,15 @@ async fn main() -> Result<()> {
         }
         Some(Commands::ShellCommand { command }) => {
             handle_shell_command(&command).await
+        }
+        Some(Commands::SetSecret { key, value }) => {
+            handle_set_secret(&db, key, value).await
+        }
+        Some(Commands::DeleteSecret { key }) => {
+            handle_delete_secret(&db, key).await
+        }
+        Some(Commands::ListSecrets) => {
+            handle_list_secrets(&db).await
         }
         Some(Commands::Chat) | None => {
             run_interactive_mode(&config).await
@@ -215,8 +249,8 @@ async fn handle_install(
     };
 
     let install_dir = match pkg_type {
-        PackageType::Plugin => std::path::PathBuf::from("plugins"),
-        PackageType::Tool => std::path::PathBuf::from("tools"),
+        PackageType::Plugin => std::path::PathBuf::from("data/plugins"),
+        PackageType::Tool => std::path::PathBuf::from("data/tools"),
     };
 
     let mut client = RegistryClient::new(
@@ -252,9 +286,9 @@ async fn handle_list(
     };
 
     let dir_name = if pkg_type == PackageType::Plugin {
-        "plugins"
+        "data/plugins"
     } else {
-        "tools"
+        "data/tools"
     };
 
     let dir_path = Path::new(dir_name);
@@ -363,9 +397,9 @@ async fn handle_remove(
     };
 
     let dir_name = if pkg_type == PackageType::Plugin {
-        "plugins"
+        "data/plugins"
     } else {
-        "tools"
+        "data/tools"
     };
 
     let package_path = Path::new(dir_name).join(&name);
@@ -502,6 +536,44 @@ async fn handle_slash_command(input: &str, config: &DrakeifyConfig) -> Result<bo
             }
             Ok(true)
         }
+        "/secrets" => {
+            if parts.len() < 2 {
+                println!("Usage: /secrets <list|set|delete> [args...]");
+                println!("  /secrets list                  - List all secret keys");
+                println!("  /secrets set <key> <value>     - Set a secret value");
+                println!("  /secrets delete <key>          - Delete a secret");
+                return Ok(true);
+            }
+
+            // Initialize database for secret operations
+            let db = Database::connect(&config.database_url).await?;
+            db.migrate().await?;
+
+            match parts[1] {
+                "list" | "ls" => {
+                    handle_list_secrets(&db).await?;
+                }
+                "set" => {
+                    if parts.len() < 4 {
+                        println!("Usage: /secrets set <key> <value>");
+                        return Ok(true);
+                    }
+                    handle_set_secret(&db, parts[2].to_string(), parts[3].to_string()).await?;
+                }
+                "delete" | "del" | "rm" => {
+                    if parts.len() < 3 {
+                        println!("Usage: /secrets delete <key>");
+                        return Ok(true);
+                    }
+                    handle_delete_secret(&db, parts[2].to_string()).await?;
+                }
+                _ => {
+                    println!("Unknown secrets command: {}", parts[1]);
+                    println!("Available commands: list, set, delete");
+                }
+            }
+            Ok(true)
+        }
         "/help" => {
             println!("\nAvailable slash commands:");
             println!("  /packages ls <plugin|tool>                                    - List installed packages");
@@ -509,6 +581,9 @@ async fn handle_slash_command(input: &str, config: &DrakeifyConfig) -> Result<bo
             println!("  /packages install <plugin|tool> <name> <version>              - Install a package");
             println!("  /packages remove <plugin|tool> <name>                         - Remove an installed package");
             println!("  /packages search <plugin|tool> <query>                        - Search for packages");
+            println!("  /secrets list                                                 - List all secret keys");
+            println!("  /secrets set <key> <value>                                    - Set a secret value");
+            println!("  /secrets delete <key>                                         - Delete a secret");
             println!("  /help                                                         - Show this help");
             println!("\nSlash commands are executed locally and do not go to the LLM.\n");
             Ok(true)
@@ -550,10 +625,13 @@ async fn execute_client_tool(
                     Ok(format!("Searched for {}s matching '{}'", package_type, query))
                 }
                 "install" => {
-                    let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'name' parameter"))?;
-                    let version = args["version"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'version' parameter"))?;
+                    let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'name' parameter for install"))?;
+                    let version = args["version"].as_str().unwrap_or("latest");
+
+                    info!("Installing {}/{} version {}", package_type, name, version);
+
                     handle_install(config, package_type.to_string(), name.to_string(), version.to_string()).await?;
-                    Ok(format!("Installed {}/{} version {}", package_type, name, version))
+                    Ok(format!("Successfully installed {}/{} version {}", package_type, name, version))
                 }
                 "remove" => {
                     let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'name' parameter"))?;
@@ -621,7 +699,15 @@ async fn run_interactive_mode(config: &DrakeifyConfig) -> Result<()> {
         .timeout(std::time::Duration::from_secs(900))
         .build()?;
 
-    let proxy_url = format!("http://{}:{}/v1/chat/completions", config.proxy_host, config.proxy_port);
+    // Convert 0.0.0.0 to localhost for client connections
+    // (0.0.0.0 is only valid for server binding, not client connections)
+    let proxy_host = if config.proxy_host == "0.0.0.0" {
+        "localhost"
+    } else {
+        &config.proxy_host
+    };
+
+    let proxy_url = format!("http://{}:{}/v1/chat/completions", proxy_host, config.proxy_port);
 
     loop {
         // Get user input
@@ -799,11 +885,20 @@ async fn run_interactive_mode(config: &DrakeifyConfig) -> Result<()> {
                     let arguments_str = call["function"]["arguments"].as_str().unwrap_or("{}");
 
                     println!("🔧 Executing tool: {}", tool_name);
+                    println!("   Arguments: {}", arguments_str);
 
                     // Execute the tool and get result
-                    let result = execute_client_tool(config, tool_name, arguments_str).await?;
-
-                    println!("✅ Tool result: {}\n", result);
+                    let result = match execute_client_tool(config, tool_name, arguments_str).await {
+                        Ok(r) => {
+                            println!("✅ Tool result: {}\n", r);
+                            r
+                        }
+                        Err(e) => {
+                            let error_msg = format!("Error executing tool: {}", e);
+                            eprintln!("❌ {}\n", error_msg);
+                            error_msg
+                        }
+                    };
 
                     // Add tool result to conversation
                     let tool_message = OllamaMessage {
@@ -836,6 +931,62 @@ async fn run_interactive_mode(config: &DrakeifyConfig) -> Result<()> {
         session_manager.update_messages(conversation_messages.clone())?;
     }
 
+    Ok(())
+}
+
+/// Handle the set-secret command
+async fn handle_set_secret(db: &Database, key: String, value: String) -> Result<()> {
+    info!("Setting secret: {}", key);
+    db.set_secret(&key, &value).await?;
+    println!("✅ Secret '{}' has been set", key);
+    Ok(())
+}
+
+/// Handle the delete-secret command
+async fn handle_delete_secret(db: &Database, key: String) -> Result<()> {
+    info!("Deleting secret: {}", key);
+    db.delete_secret(&key).await?;
+    println!("✅ Secret '{}' has been deleted", key);
+    Ok(())
+}
+
+/// Handle the list-secrets command
+async fn handle_list_secrets(db: &Database) -> Result<()> {
+    info!("Listing all secret keys");
+
+    // Get all secrets (we'll only show keys, not values)
+    let secrets: Vec<(String, String, String)> = match db {
+        Database::Sqlite(pool) => {
+            sqlx::query_as("SELECT key, created_at, updated_at FROM secrets ORDER BY key")
+                .fetch_all(pool)
+                .await?
+        }
+        Database::Postgres(pool) => {
+            sqlx::query_as("SELECT key, created_at, updated_at FROM secrets ORDER BY key")
+                .fetch_all(pool)
+                .await?
+        }
+    };
+
+    if secrets.is_empty() {
+        println!("No secrets found");
+        return Ok(());
+    }
+
+    println!("\n📋 Secrets:");
+    println!("{:<40} {:<25} {:<25}", "Key", "Created", "Updated");
+    println!("{}", "-".repeat(90));
+
+    for (key, created_at, updated_at) in secrets {
+        println!(
+            "{:<40} {:<25} {:<25}",
+            key,
+            created_at,
+            updated_at
+        );
+    }
+
+    println!();
     Ok(())
 }
 

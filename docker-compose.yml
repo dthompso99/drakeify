@@ -40,10 +40,10 @@ services:
     
     volumes:
       # Mount tools and plugins directories
-      - ./tools:/tools:ro
-      - ./plugins:/plugins:ro
+      - ./tools:/data/tools:ro
+      - ./plugins:/data/plugins:ro
       # Mount sessions directory for persistence
-      - drakeify-sessions:/sessions
+      - drakeify-sessions:/data/sessions
     
     restart: unless-stopped
 

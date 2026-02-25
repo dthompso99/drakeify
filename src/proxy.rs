@@ -17,6 +17,7 @@ use tokio_stream::StreamExt;
 
 use crate::llm::{OllamaMessage, OllamaRequest, OllamaOptions, OllamaFunction, OllamaToolCall, OllamaFunctionCall, LlmConfig};
 use crate::js_runtime::JsRuntimeConfig;
+use crate::database::Database;
 
 /// Anthropic system prompt can be string or array of content blocks
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -266,6 +267,7 @@ pub struct ProxyState {
     pub disabled_tools: Option<Vec<String>>,
     pub enabled_plugins: Option<Vec<String>>,
     pub disabled_plugins: Option<Vec<String>>,
+    pub database: Arc<Database>,
 }
 
 /// Convert Anthropic Messages format to OpenAI Chat Completions format
@@ -378,6 +380,7 @@ pub async fn start_proxy_server(
     disabled_tools: Option<Vec<String>>,
     enabled_plugins: Option<Vec<String>>,
     disabled_plugins: Option<Vec<String>>,
+    database: Database,
 ) -> Result<()> {
     let llm_config = LlmConfig {
         host: llm_host,
@@ -395,6 +398,7 @@ pub async fn start_proxy_server(
         disabled_tools,
         enabled_plugins,
         disabled_plugins,
+        database: Arc::new(database),
     });
 
     // Configure CORS to allow all origins (for development/testing)
@@ -418,6 +422,37 @@ pub async fn start_proxy_server(
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// Interpolate secrets in a string
+/// Replaces ${secret.scope.name} with the actual secret value from the database
+async fn interpolate_secrets(text: &str, database: &Database) -> Result<String> {
+    let mut result = text.to_string();
+
+    // Find all ${secret.scope.name} patterns
+    let re = regex::Regex::new(r"\$\{secret\.([^}]+)\}").unwrap();
+
+    for cap in re.captures_iter(text) {
+        let full_match = &cap[0];
+        let secret_key = &cap[1];
+
+        // Get the secret value from database
+        match database.get_secret(secret_key).await {
+            Ok(Some(value)) => {
+                result = result.replace(full_match, &value);
+            }
+            Ok(None) => {
+                warn!("Secret not found: {}", secret_key);
+                // Leave the placeholder as-is if secret not found
+            }
+            Err(e) => {
+                error!("Failed to get secret {}: {}", secret_key, e);
+                // Leave the placeholder as-is on error
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 /// Result of the tool execution loop
@@ -796,7 +831,8 @@ async fn handle_streaming_request(
             let mut tool_registry = match crate::tools::ToolRegistry::new(
                 state_clone.js_config.clone(),
                 state_clone.enabled_tools.clone(),
-                state_clone.disabled_tools.clone()
+                state_clone.disabled_tools.clone(),
+                Some(state_clone.database.clone())
             ) {
                 Ok(r) => r,
                 Err(e) => {
@@ -805,14 +841,15 @@ async fn handle_streaming_request(
                 }
             };
 
-            if let Err(e) = tool_registry.load_tools_from_dir("tools") {
+            if let Err(e) = tool_registry.load_tools_from_dir("data/tools") {
                 error!("Failed to load tools: {}", e);
             }
 
             let mut plugin_registry = match crate::plugins::PluginRegistry::new(
                 state_clone.js_config.clone(),
                 state_clone.enabled_plugins.clone(),
-                state_clone.disabled_plugins.clone()
+                state_clone.disabled_plugins.clone(),
+                Some(state_clone.database.clone())
             ) {
                 Ok(r) => r,
                 Err(e) => {
@@ -821,7 +858,7 @@ async fn handle_streaming_request(
                 }
             };
 
-            if let Err(e) = plugin_registry.load_plugins_from_dir("plugins") {
+            if let Err(e) = plugin_registry.load_plugins_from_dir("data/plugins") {
                 error!("Failed to load plugins: {}", e);
             }
 
@@ -1147,11 +1184,12 @@ async fn chat_completions_handler(
         let mut tool_registry = crate::tools::ToolRegistry::new(
             state_clone.js_config.clone(),
             state_clone.enabled_tools.clone(),
-            state_clone.disabled_tools.clone()
+            state_clone.disabled_tools.clone(),
+            Some(state_clone.database.clone())
         )?;
 
         // Load tools
-        if let Err(e) = tool_registry.load_tools_from_dir("tools") {
+        if let Err(e) = tool_registry.load_tools_from_dir("data/tools") {
             error!("Failed to load tools: {}", e);
         }
 
@@ -1159,11 +1197,12 @@ async fn chat_completions_handler(
         let mut plugin_registry = crate::plugins::PluginRegistry::new(
             state_clone.js_config.clone(),
             state_clone.enabled_plugins.clone(),
-            state_clone.disabled_plugins.clone()
+            state_clone.disabled_plugins.clone(),
+            Some(state_clone.database.clone())
         )?;
 
         // Load plugins
-        if let Err(e) = plugin_registry.load_plugins_from_dir("plugins") {
+        if let Err(e) = plugin_registry.load_plugins_from_dir("data/plugins") {
             error!("Failed to load plugins: {}", e);
         }
 

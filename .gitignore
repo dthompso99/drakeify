@@ -7,6 +7,13 @@ Cargo.lock
 *.log
 drakeify.toml
 
+# Installed packages (subdirectories in data/tools and data/plugins)
+/data/tools/*/
+/data/plugins/*/
+/data/drakeify.db
+/data/drakeify.db-shm
+/data/drakeify.db-wal
+
 # Editor
 .vscode/
 .idea/

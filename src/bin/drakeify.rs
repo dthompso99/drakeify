@@ -2,7 +2,7 @@
 // This binary runs only the HTTP proxy server
 
 use anyhow::Result;
-use drakeify::{DrakeifyConfig, init_logging, proxy};
+use drakeify::{DrakeifyConfig, init_logging, proxy, Database};
 use tracing::info;
 
 #[tokio::main]
@@ -13,6 +13,10 @@ async fn main() -> Result<()> {
     init_logging(&config)?;
 
     info!("Drakeify proxy starting up");
+
+    // Initialize database
+    let db = Database::connect(&config.database_url).await?;
+    db.migrate().await?;
 
     // Create JavaScript runtime configuration
     let js_config = drakeify::JsRuntimeConfig {
@@ -38,6 +42,7 @@ async fn main() -> Result<()> {
         config.disabled_tools.clone(),
         config.enabled_plugins.clone(),
         config.disabled_plugins.clone(),
+        db,
     ).await?;
 
     Ok(())

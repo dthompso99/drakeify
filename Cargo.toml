@@ -38,5 +38,8 @@ tar = "0.4"
 flate2 = "1.0"
 semver = "1.0"
 clap = { version = "4.5", features = ["derive"] }
+regex = "1.10"
+# Database support - SQLite by default, PostgreSQL optional
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "postgres", "migrate", "chrono"] }
 
 

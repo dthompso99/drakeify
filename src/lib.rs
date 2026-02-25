@@ -7,6 +7,7 @@ pub mod js_runtime;
 pub mod session;
 pub mod proxy;
 pub mod registry;
+pub mod database;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -19,6 +20,7 @@ pub use plugins::PluginRegistry;
 pub use js_runtime::JsRuntimeConfig;
 pub use session::SessionManager;
 pub use registry::{RegistryClient, PackageMetadata, PackageType};
+pub use database::Database;
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone)]
 pub struct DrakeifyConfig {
@@ -96,6 +98,10 @@ pub struct DrakeifyConfig {
     pub registry_password: Option<String>,
     #[serde(default = "default_registry_insecure")]
     pub registry_insecure: bool,
+
+    // Database Configuration
+    #[serde(default = "default_database_url")]
+    pub database_url: String,
 }
 
 impl DrakeifyConfig {
@@ -174,10 +180,16 @@ impl DrakeifyConfig {
         if let Ok(val) = env::var("DRAKEIFY_REGISTRY_INSECURE") {
             config.registry_insecure = val.parse().unwrap_or(config.registry_insecure);
         }
+        if let Ok(val) = env::var("DRAKEIFY_DATABASE_URL") {
+            config.database_url = val;
+        }
 
         // Apply defaults for empty string values
         if config.registry_url.is_empty() {
             config.registry_url = default_registry_url();
+        }
+        if config.database_url.is_empty() {
+            config.database_url = default_database_url();
         }
 
         Ok(config)
@@ -239,6 +251,10 @@ fn default_registry_url() -> String {
 
 fn default_registry_insecure() -> bool {
     false
+}
+
+fn default_database_url() -> String {
+    "sqlite://data/drakeify.db".to_string()
 }
 
 /// Initialize logging based on configuration

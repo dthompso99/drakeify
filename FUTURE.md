@@ -25,6 +25,7 @@ The following is just a checklist of future plans, not in any particular order. 
    - test with existing agents such as claude code, zed, etc.
    - create a test suite against multiple LLMs to ensure compatibility
  - secrets management
+ - config managment
  - fine grained permissions
    - while drakeify does not enable any dangerous tools by itself, pluging and tools can.
  - explore the concept of "channels": 

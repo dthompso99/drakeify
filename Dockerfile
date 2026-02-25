@@ -8,6 +8,7 @@ COPY Cargo.toml ./
 RUN rustup target add x86_64-unknown-linux-musl
 
 COPY ./src ./src
+COPY ./migrations ./migrations
 
 RUN cargo build --release --target x86_64-unknown-linux-musl
 
@@ -52,7 +53,7 @@ ARG LOG_TO_FILE=false
 ARG LOG_FILE=/var/log/drakeify.log
 
 # Session Configuration
-ARG SESSIONS_DIR=/sessions
+ARG SESSIONS_DIR=/data/sessions
 ARG AUTO_SAVE=true
 
 # HTTP Configuration
