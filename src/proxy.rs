@@ -1,5 +1,5 @@
 use axum::{
-    extract::State,
+    extract::{State, Path},
     http::StatusCode,
     response::{IntoResponse, Response, sse::{Event, Sse}},
     routing::{get, post},
@@ -412,6 +412,7 @@ pub async fn start_proxy_server(
         .route("/v1/messages", post(anthropic_messages_handler))
         .route("/v1/messages/count_tokens", post(anthropic_count_tokens_handler))
         .route("/v1/models", get(models_handler))
+        .route("/webhook/:plugin_name", post(webhook_handler))
         .layer(cors)
         .with_state(state);
 
@@ -1116,6 +1117,68 @@ async fn models_handler(
     };
 
     (StatusCode::OK, Json(response)).into_response()
+}
+
+/// Handler for /webhook/:plugin_name endpoint
+async fn webhook_handler(
+    State(state): State<Arc<ProxyState>>,
+    Path(plugin_name): Path<String>,
+    Json(payload): Json<Value>,
+) -> Response {
+    info!("🪝 Received webhook call for plugin: {}", plugin_name);
+
+    // Clone state and plugin_name for blocking task
+    let state_clone = state.as_ref().clone();
+    let plugin_name_clone = plugin_name.clone();
+
+    // Execute webhook in a blocking task (PluginRegistry is not Send)
+    let result = tokio::task::spawn_blocking(move || {
+        // Create plugin registry
+        let mut plugin_registry = crate::plugins::PluginRegistry::new(
+            state_clone.js_config.clone(),
+            state_clone.enabled_plugins.clone(),
+            state_clone.disabled_plugins.clone(),
+            Some(state_clone.database.clone())
+        )?;
+
+        // Load plugins
+        if let Err(e) = plugin_registry.load_plugins_from_dir("data/plugins") {
+            error!("Failed to load plugins: {}", e);
+            return Err(anyhow::anyhow!("Failed to load plugins: {}", e));
+        }
+
+        // Execute webhook hook for the specific plugin
+        let webhook_data = serde_json::json!({
+            "payload": payload,
+        });
+
+        plugin_registry.execute_webhook_hook(&plugin_name_clone, webhook_data)
+    }).await;
+
+    match result {
+        Ok(Ok(response_data)) => {
+            info!("✅ Webhook executed successfully for plugin: {}", plugin_name);
+            (StatusCode::OK, Json(response_data)).into_response()
+        }
+        Ok(Err(e)) => {
+            error!("❌ Webhook execution failed for plugin {}: {}", plugin_name, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Webhook execution failed: {}", e)
+                }))
+            ).into_response()
+        }
+        Err(e) => {
+            error!("❌ Webhook task failed for plugin {}: {}", plugin_name, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Webhook task failed: {}", e)
+                }))
+            ).into_response()
+        }
+    }
 }
 
 /// Handler for /v1/chat/completions endpoint

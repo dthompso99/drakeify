@@ -180,7 +180,7 @@ impl PluginRegistry {
             let mut hooks = HashSet::new();
             
             for hook_name in ["pre_request", "post_response", "on_stream_chunk",
-                               "on_conversation_turn", "on_tool_call", "on_tool_result"] {
+                               "on_conversation_turn", "on_tool_call", "on_tool_result", "on_webhook_call"] {
                 if hooks_obj.get::<_, Option<bool>>(hook_name)?.unwrap_or(false) {
                     hooks.insert(hook_name.to_string());
                 }
@@ -200,6 +200,13 @@ impl PluginRegistry {
         })
     }
 
+    /// Get all plugins that have a specific hook
+    pub fn get_plugins_with_hook(&self, hook_name: &str) -> Vec<&Plugin> {
+        self.plugins.iter()
+            .filter(|p| p.hooks.contains(hook_name))
+            .collect()
+    }
+
     /// Execute a hook with the given data
     /// Returns the modified data after all plugins have processed it
     pub fn execute_hook(&self, hook_name: &str, mut data: Value) -> Result<Value> {
@@ -217,6 +224,19 @@ impl PluginRegistry {
             }
         }
         Ok(data)
+    }
+
+    /// Execute a webhook hook for a specific plugin by name
+    pub fn execute_webhook_hook(&self, plugin_name: &str, data: Value) -> Result<Value> {
+        let plugin = self.plugins.iter()
+            .find(|p| p.name == plugin_name)
+            .ok_or_else(|| anyhow::anyhow!("Plugin '{}' not found", plugin_name))?;
+
+        if !plugin.hooks.contains("on_webhook_call") {
+            return Err(anyhow::anyhow!("Plugin '{}' does not have on_webhook_call hook", plugin_name));
+        }
+
+        self.execute_plugin_hook(plugin, "on_webhook_call", data)
     }
 
     /// Execute a specific plugin's hook handler
