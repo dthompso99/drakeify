@@ -1,6 +1,6 @@
 use axum::{
     extract::{State, Path},
-    http::StatusCode,
+    http::{StatusCode, HeaderMap},
     response::{IntoResponse, Response, sse::{Event, Sse}},
     routing::{get, post},
     Json, Router,
@@ -18,6 +18,19 @@ use tokio_stream::StreamExt;
 use crate::llm::{OllamaMessage, OllamaRequest, OllamaOptions, OllamaFunction, OllamaToolCall, OllamaFunctionCall, LlmConfig};
 use crate::js_runtime::JsRuntimeConfig;
 use crate::database::Database;
+
+/// Extract account_id from Authorization header
+/// Format: "Authorization: Bearer <api_key>"
+/// Returns the API key as account_id, or "anonymous" if not present
+fn extract_account_id(headers: &HeaderMap) -> String {
+    headers
+        .get("authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "anonymous".to_string())
+}
 
 /// Anthropic system prompt can be string or array of content blocks
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -804,6 +817,7 @@ fn execute_tool_loop_sync(
 async fn handle_streaming_request(
     state: Arc<ProxyState>,
     request: ChatCompletionRequest,
+    account_id: String,
 ) -> Response {
     use tokio_stream::wrappers::UnboundedReceiverStream;
     use std::convert::Infallible;
@@ -825,6 +839,7 @@ async fn handle_streaming_request(
         let state_clone = state.as_ref().clone();
         let client_tools = request.tools.clone();
         let tx_clone = tx.clone();
+        let account_id_clone = account_id.clone();
 
         // Execute in blocking task
         let result = tokio::task::spawn_blocking(move || {
@@ -833,7 +848,8 @@ async fn handle_streaming_request(
                 state_clone.js_config.clone(),
                 state_clone.enabled_tools.clone(),
                 state_clone.disabled_tools.clone(),
-                Some(state_clone.database.clone())
+                Some(state_clone.database.clone()),
+                Some(account_id_clone.clone())
             ) {
                 Ok(r) => r,
                 Err(e) => {
@@ -850,7 +866,10 @@ async fn handle_streaming_request(
                 state_clone.js_config.clone(),
                 state_clone.enabled_plugins.clone(),
                 state_clone.disabled_plugins.clone(),
-                Some(state_clone.database.clone())
+                Some(state_clone.database.clone()),
+                Some(account_id_clone.clone()),
+                Some(state_clone.llm_config.clone()),
+                Some(state_clone.llm_model.clone()),
             ) {
                 Ok(r) => r,
                 Err(e) => {
@@ -1013,6 +1032,7 @@ async fn handle_streaming_request(
 /// Handler for /v1/messages endpoint (Anthropic Messages API)
 async fn anthropic_messages_handler(
     State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
     Json(request): Json<AnthropicMessagesRequest>,
 ) -> Response {
     info!("📨 Received Anthropic Messages API request for model: {}", request.model);
@@ -1021,7 +1041,7 @@ async fn anthropic_messages_handler(
     let openai_request = anthropic_to_openai(request);
 
     // Call the existing chat completions handler logic
-    let response = chat_completions_handler(State(state), Json(openai_request)).await;
+    let response = chat_completions_handler(State(state), headers, Json(openai_request)).await;
 
     // For now, return the response as-is
     // TODO: Convert OpenAI response back to Anthropic format for non-streaming
@@ -1133,12 +1153,17 @@ async fn webhook_handler(
 
     // Execute webhook in a blocking task (PluginRegistry is not Send)
     let result = tokio::task::spawn_blocking(move || {
-        // Create plugin registry
+        // Create plugin registry with default webhook account_id
+        // Plugin can call set_account_id() to change it based on payload
+        let webhook_account_id = format!("webhook:{}", plugin_name_clone);
         let mut plugin_registry = crate::plugins::PluginRegistry::new(
             state_clone.js_config.clone(),
             state_clone.enabled_plugins.clone(),
             state_clone.disabled_plugins.clone(),
-            Some(state_clone.database.clone())
+            Some(state_clone.database.clone()),
+            Some(webhook_account_id),
+            Some(state_clone.llm_config.clone()),
+            Some(state_clone.llm_model.clone()),
         )?;
 
         // Load plugins
@@ -1184,9 +1209,12 @@ async fn webhook_handler(
 /// Handler for /v1/chat/completions endpoint
 async fn chat_completions_handler(
     State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
     Json(request): Json<ChatCompletionRequest>,
 ) -> Response {
-    info!("📨 Received chat completion request for model: {}", request.model);
+    // Extract account_id from Authorization header
+    let account_id = extract_account_id(&headers);
+    info!("📨 Received chat completion request for model: {} (account: {})", request.model, account_id);
     info!("   Messages: {}", request.messages.len());
 
     // Log message details
@@ -1225,7 +1253,7 @@ async fn chat_completions_handler(
     // Check if streaming is requested
     if request.stream {
         info!("📡 Streaming mode requested");
-        return handle_streaming_request(state, request).await;
+        return handle_streaming_request(state, request, account_id).await;
     }
 
     // Convert OpenAI messages to Ollama format
@@ -1237,9 +1265,10 @@ async fn chat_completions_handler(
         }
     }).collect();
 
-    // Clone state and client tools for the blocking task
+    // Clone state, client tools, and account_id for the blocking task
     let state_clone = state.as_ref().clone();
     let client_tools = request.tools.clone();
+    let account_id_clone = account_id.clone();
 
     // Execute the tool loop in a blocking task (ToolRegistry and PluginRegistry are not Send)
     let result = tokio::task::spawn_blocking(move || {
@@ -1248,7 +1277,8 @@ async fn chat_completions_handler(
             state_clone.js_config.clone(),
             state_clone.enabled_tools.clone(),
             state_clone.disabled_tools.clone(),
-            Some(state_clone.database.clone())
+            Some(state_clone.database.clone()),
+            Some(account_id_clone.clone())
         )?;
 
         // Load tools
@@ -1261,7 +1291,10 @@ async fn chat_completions_handler(
             state_clone.js_config.clone(),
             state_clone.enabled_plugins.clone(),
             state_clone.disabled_plugins.clone(),
-            Some(state_clone.database.clone())
+            Some(state_clone.database.clone()),
+            Some(account_id_clone.clone()),
+            Some(state_clone.llm_config.clone()),
+            Some(state_clone.llm_model.clone()),
         )?;
 
         // Load plugins

@@ -583,6 +583,104 @@ fn setup_http_fetch(ctx: &rquickjs::Ctx, _config: &JsRuntimeConfig) -> Result<()
                 return {};
             }
         };
+
+        // Placeholder for session functions - will be replaced by Rust if database is available
+        globalThis.__rust_get_session = function(sessionId) {
+            throw new Error('Session management not available in this context');
+        };
+
+        globalThis.__rust_set_session = function(sessionId, sessionDataJson) {
+            throw new Error('Session management not available in this context');
+        };
+
+        // Session getter function
+        globalThis.get_session = function(sessionId) {
+            try {
+                var resultJson = __rust_get_session(sessionId);
+                var result = JSON.parse(resultJson);
+
+                // Check for error
+                if (result.__error) {
+                    throw new Error(result.__error);
+                }
+
+                return result;
+            } catch (e) {
+                throw new Error('Failed to get session: ' + String(e));
+            }
+        };
+
+        // Session setter function
+        globalThis.set_session = function(sessionId, sessionData) {
+            try {
+                var sessionDataJson = JSON.stringify(sessionData);
+                var resultJson = __rust_set_session(sessionId, sessionDataJson);
+                var result = JSON.parse(resultJson);
+
+                // Check for error
+                if (result.__error) {
+                    throw new Error(result.__error);
+                }
+            } catch (e) {
+                throw new Error('Failed to set session: ' + String(e));
+            }
+        };
+
+        // Placeholder for LLM function - will be replaced by Rust if LLM config is available
+        globalThis.__rust_call_llm = function(optionsJson) {
+            throw new Error('LLM not available in this context');
+        };
+
+        // LLM caller function
+        globalThis.call_llm = function(options) {
+            try {
+                // Validate options
+                if (!options || !options.messages) {
+                    throw new Error('options.messages is required');
+                }
+
+                var optionsJson = JSON.stringify(options);
+                var resultJson = __rust_call_llm(optionsJson);
+                var result = JSON.parse(resultJson);
+
+                // Check for error
+                if (result.__error) {
+                    throw new Error(result.__error);
+                }
+
+                return result;
+            } catch (e) {
+                throw new Error('Failed to call LLM: ' + String(e));
+            }
+        };
+
+        // Placeholder for process_conversation - will be replaced by Rust if LLM config is available
+        globalThis.__rust_process_conversation = function(messagesJson) {
+            throw new Error('process_conversation not available in this context');
+        };
+
+        // Process conversation function - runs full Drakeify loop with tools and plugins
+        globalThis.process_conversation = function(messages) {
+            try {
+                // Validate messages
+                if (!messages || !Array.isArray(messages)) {
+                    throw new Error('messages must be an array');
+                }
+
+                var messagesJson = JSON.stringify(messages);
+                var resultJson = __rust_process_conversation(messagesJson);
+                var result = JSON.parse(resultJson);
+
+                // Check for error
+                if (result.__error) {
+                    throw new Error(result.__error);
+                }
+
+                return result;
+            } catch (e) {
+                throw new Error('Failed to process conversation: ' + String(e));
+            }
+        };
     "#;
     let _: rquickjs::Value = ctx.eval(http_code.as_bytes())?;
 

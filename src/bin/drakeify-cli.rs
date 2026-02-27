@@ -782,13 +782,24 @@ async fn run_interactive_mode(config: &DrakeifyConfig) -> Result<()> {
     // Load client tools
     let client_tools = load_client_tools()?;
 
+    // Initialize database for session management
+    let db = std::sync::Arc::new(Database::connect(&config.database_url).await?);
+    db.migrate().await?;
+
+    // Use identity from config as account_id, or default to "cli"
+    let account_id = if config.identity.is_empty() {
+        "cli".to_string()
+    } else {
+        config.identity.clone()
+    };
+
     // Initialize session manager
-    let mut session_manager = SessionManager::new(&config.sessions_dir, config.auto_save)?;
+    let mut session_manager = SessionManager::new(db.clone(), account_id, config.auto_save)?;
 
     // Load existing session or create new one
     if let Some(session_id) = &config.session_id {
         if !session_id.is_empty() {
-            match session_manager.load_session(session_id) {
+            match session_manager.load_session(session_id).await {
                 Ok(_) => {
                     info!("📂 Loaded session: {}", session_id);
                 }
@@ -819,7 +830,7 @@ async fn run_interactive_mode(config: &DrakeifyConfig) -> Result<()> {
     let mut conversation_messages = session_manager.get_messages();
     if conversation_messages.is_empty() {
         conversation_messages.push(system_message);
-        session_manager.update_messages(conversation_messages.clone())?;
+        session_manager.update_messages(conversation_messages.clone()).await?;
     }
 
     // Create HTTP client for talking to the proxy
@@ -1056,7 +1067,7 @@ async fn run_interactive_mode(config: &DrakeifyConfig) -> Result<()> {
         conversation_messages.push(assistant_message);
 
         // Save entire conversation to session
-        session_manager.update_messages(conversation_messages.clone())?;
+        session_manager.update_messages(conversation_messages.clone()).await?;
     }
 
     Ok(())

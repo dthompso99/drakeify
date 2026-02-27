@@ -1,10 +1,10 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
+use std::sync::Arc;
 
 use crate::llm::OllamaMessage;
+use crate::database::Database;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -15,30 +15,26 @@ pub struct Session {
     pub metadata: SessionMetadata,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SessionMetadata {
     pub title: Option<String>,
+    #[serde(default)]
     pub tags: Vec<String>,
 }
 
 pub struct SessionManager {
-    sessions_dir: PathBuf,
+    database: Arc<Database>,
+    account_id: String,
     current_session: Option<Session>,
     auto_save: bool,
 }
 
 impl SessionManager {
     /// Create a new session manager
-    pub fn new(sessions_dir: impl AsRef<Path>, auto_save: bool) -> Result<Self> {
-        let sessions_dir = sessions_dir.as_ref().to_path_buf();
-        
-        // Create sessions directory if it doesn't exist
-        if !sessions_dir.exists() {
-            fs::create_dir_all(&sessions_dir)?;
-        }
-        
+    pub fn new(database: Arc<Database>, account_id: String, auto_save: bool) -> Result<Self> {
         Ok(Self {
-            sessions_dir,
+            database,
+            account_id,
             current_session: None,
             auto_save,
         })
@@ -65,38 +61,52 @@ impl SessionManager {
     }
     
     /// Load an existing session
-    pub fn load_session(&mut self, session_id: &str) -> Result<()> {
-        let session_path = self.sessions_dir.join(format!("{}.json", session_id));
-        
-        if !session_path.exists() {
+    pub async fn load_session(&mut self, session_id: &str) -> Result<()> {
+        let result = self.database.get_session(session_id, &self.account_id).await?;
+
+        if let Some((messages_json, metadata_json)) = result {
+            let messages: Vec<OllamaMessage> = serde_json::from_str(&messages_json)?;
+            let metadata: SessionMetadata = serde_json::from_str(&metadata_json)?;
+
+            let session = Session {
+                id: session_id.to_string(),
+                created_at: Utc::now(), // We'll get this from DB in future if needed
+                updated_at: Utc::now(),
+                messages,
+                metadata,
+            };
+
+            self.current_session = Some(session);
+            Ok(())
+        } else {
             anyhow::bail!("Session not found: {}", session_id);
         }
-        
-        let session_json = fs::read_to_string(&session_path)?;
-        let session: Session = serde_json::from_str(&session_json)?;
-        
-        self.current_session = Some(session);
-        Ok(())
     }
     
     /// Save the current session
-    pub fn save_session(&self) -> Result<()> {
+    pub async fn save_session(&self) -> Result<()> {
         if let Some(session) = &self.current_session {
-            let session_path = self.sessions_dir.join(format!("{}.json", session.id));
-            let session_json = serde_json::to_string_pretty(session)?;
-            fs::write(&session_path, session_json)?;
+            let messages_json = serde_json::to_string(&session.messages)?;
+            let metadata_json = serde_json::to_string(&session.metadata)?;
+
+            self.database.upsert_session(
+                &session.id,
+                &self.account_id,
+                &messages_json,
+                &metadata_json,
+            ).await?;
         }
         Ok(())
     }
     
     /// Add a message to the current session
-    pub fn add_message(&mut self, message: OllamaMessage) -> Result<()> {
+    pub async fn add_message(&mut self, message: OllamaMessage) -> Result<()> {
         if let Some(session) = &mut self.current_session {
             session.messages.push(message);
             session.updated_at = Utc::now();
-            
+
             if self.auto_save {
-                self.save_session()?;
+                self.save_session().await?;
             }
         }
         Ok(())
@@ -111,13 +121,13 @@ impl SessionManager {
     }
 
     /// Update all messages in the current session (replaces existing messages)
-    pub fn update_messages(&mut self, messages: Vec<OllamaMessage>) -> Result<()> {
+    pub async fn update_messages(&mut self, messages: Vec<OllamaMessage>) -> Result<()> {
         if let Some(session) = &mut self.current_session {
             session.messages = messages;
             session.updated_at = Utc::now();
 
             if self.auto_save {
-                self.save_session()?;
+                self.save_session().await?;
             }
         }
         Ok(())
@@ -128,22 +138,9 @@ impl SessionManager {
         self.current_session.as_ref().map(|s| s.id.clone())
     }
     
-    /// List all available sessions
-    pub fn list_sessions(&self) -> Result<Vec<String>> {
-        let mut sessions = Vec::new();
-        
-        for entry in fs::read_dir(&self.sessions_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            
-            if path.extension().and_then(|s| s.to_str()) == Some("json") {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    sessions.push(stem.to_string());
-                }
-            }
-        }
-        
-        Ok(sessions)
+    /// List all available sessions for the current account
+    pub async fn list_sessions(&self) -> Result<Vec<String>> {
+        self.database.list_sessions(&self.account_id).await
     }
     
     /// Generate a unique session ID

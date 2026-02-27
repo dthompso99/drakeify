@@ -5,10 +5,13 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::rc::Rc;
+use std::cell::RefCell;
 use tracing::{info, warn};
 
 use crate::js_runtime::{JsRuntimeConfig, setup_js_globals, http_get_sync, http_post_sync, http_request_sync, HttpRequestOptions};
 use crate::database::Database;
+use crate::llm::{LlmConfig, OllamaRequest, OllamaOptions, OllamaMessage};
+use crate::session::SessionMetadata;
 use std::collections::HashMap;
 
 /// Interpolate secrets in a string (synchronous version for use in closures)
@@ -56,10 +59,21 @@ pub struct PluginRegistry {
     enabled_plugins: Option<Vec<String>>,
     disabled_plugins: Option<Vec<String>>,
     database: Option<std::sync::Arc<Database>>,
+    account_id: Rc<RefCell<String>>,
+    llm_config: Option<LlmConfig>,
+    llm_model: Option<String>,
 }
 
 impl PluginRegistry {
-    pub fn new(config: JsRuntimeConfig, enabled_plugins: Option<Vec<String>>, disabled_plugins: Option<Vec<String>>, database: Option<std::sync::Arc<Database>>) -> Result<Self> {
+    pub fn new(
+        config: JsRuntimeConfig,
+        enabled_plugins: Option<Vec<String>>,
+        disabled_plugins: Option<Vec<String>>,
+        database: Option<std::sync::Arc<Database>>,
+        account_id: Option<String>,
+        llm_config: Option<LlmConfig>,
+        llm_model: Option<String>,
+    ) -> Result<Self> {
         let runtime = Runtime::new()?;
 
         // Setup globals in the runtime
@@ -73,6 +87,9 @@ impl PluginRegistry {
             enabled_plugins,
             disabled_plugins,
             database,
+            account_id: Rc::new(RefCell::new(account_id.unwrap_or_else(|| "anonymous".to_string()))),
+            llm_config,
+            llm_model,
         })
     }
 
@@ -451,6 +468,304 @@ impl PluginRegistry {
                     }
                 })?;
                 ctx.globals().set("__rust_get_config", get_config_fn)?;
+                Ok::<(), anyhow::Error>(())
+            })?;
+        }
+
+        // Inject account_id functions
+        ctx.with(|ctx| {
+            let account_id_clone = self.account_id.clone();
+            let get_account_id_fn = Function::new(ctx.clone(), move || -> String {
+                account_id_clone.borrow().clone()
+            })?;
+            ctx.globals().set("get_account_id", get_account_id_fn)?;
+
+            let account_id_clone2 = self.account_id.clone();
+            let set_account_id_fn = Function::new(ctx.clone(), move |new_id: String| {
+                *account_id_clone2.borrow_mut() = new_id;
+            })?;
+            ctx.globals().set("set_account_id", set_account_id_fn)?;
+
+            Ok::<(), anyhow::Error>(())
+        })?;
+
+        // Inject session functions if database is available
+        if let Some(ref db) = self.database {
+            ctx.with(|ctx| {
+                let database_clone = db.clone();
+                let account_id_clone = self.account_id.clone();
+
+                // get_session(session_id) -> object | null
+                let get_session_fn = Function::new(ctx.clone(), move |session_id: String| -> String {
+                    if let Some(h) = tokio::runtime::Handle::try_current().ok() {
+                        let db_clone = database_clone.clone();
+                        let account_id = account_id_clone.borrow().clone();
+
+                        h.block_on(async move {
+                            match db_clone.get_session(&session_id, &account_id).await {
+                                Ok(Some((messages, metadata))) => {
+                                    // Return session object with messages and metadata
+                                    serde_json::json!({
+                                        "messages": messages,
+                                        "metadata": metadata
+                                    }).to_string()
+                                }
+                                Ok(None) => "null".to_string(),
+                                Err(e) => {
+                                    // Throw error by returning error JSON
+                                    serde_json::json!({
+                                        "__error": format!("Failed to get session: {}", e)
+                                    }).to_string()
+                                }
+                            }
+                        })
+                    } else {
+                        serde_json::json!({
+                            "__error": "No tokio runtime available"
+                        }).to_string()
+                    }
+                })?;
+                ctx.globals().set("__rust_get_session", get_session_fn)?;
+
+                let database_clone2 = db.clone();
+                let account_id_clone2 = self.account_id.clone();
+
+                // set_session(session_id, session_data) -> void
+                let set_session_fn = Function::new(ctx.clone(), move |session_id: String, session_data_json: String| -> String {
+                    if let Some(h) = tokio::runtime::Handle::try_current().ok() {
+                        let db_clone = database_clone2.clone();
+                        let account_id = account_id_clone2.borrow().clone();
+
+                        h.block_on(async move {
+                            // Parse session data
+                            let session_data: serde_json::Value = match serde_json::from_str(&session_data_json) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    return serde_json::json!({
+                                        "__error": format!("Failed to parse session data: {}", e)
+                                    }).to_string();
+                                }
+                            };
+
+                            // Extract messages and metadata
+                            let messages = session_data.get("messages")
+                                .cloned()
+                                .unwrap_or(serde_json::json!([]));
+
+                            let metadata = session_data.get("metadata")
+                                .and_then(|v| serde_json::from_value::<SessionMetadata>(v.clone()).ok())
+                                .unwrap_or_default();
+
+                            // Serialize to strings for database
+                            let messages_str = messages.to_string();
+                            let metadata_str = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
+
+                            match db_clone.upsert_session(&session_id, &account_id, &messages_str, &metadata_str).await {
+                                Ok(_) => "null".to_string(),
+                                Err(e) => {
+                                    serde_json::json!({
+                                        "__error": format!("Failed to save session: {}", e)
+                                    }).to_string()
+                                }
+                            }
+                        })
+                    } else {
+                        serde_json::json!({
+                            "__error": "No tokio runtime available"
+                        }).to_string()
+                    }
+                })?;
+                ctx.globals().set("__rust_set_session", set_session_fn)?;
+
+                Ok::<(), anyhow::Error>(())
+            })?;
+        }
+
+        // Inject call_llm function if llm_config is available
+        if let (Some(llm_config), Some(llm_model)) = (&self.llm_config, &self.llm_model) {
+            ctx.with(|ctx| {
+                let llm_config_clone = llm_config.clone();
+                let llm_model_clone = llm_model.clone();
+
+                // call_llm(options) -> object
+                let call_llm_fn = Function::new(ctx.clone(), move |options_json: String| -> String {
+                    if let Some(h) = tokio::runtime::Handle::try_current().ok() {
+                        let config = llm_config_clone.clone();
+                        let default_model = llm_model_clone.clone();
+
+                        h.block_on(async move {
+                            // Parse options
+                            let options: serde_json::Value = match serde_json::from_str(&options_json) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    return serde_json::json!({
+                                        "__error": format!("Failed to parse options: {}", e)
+                                    }).to_string();
+                                }
+                            };
+
+                            // Extract messages
+                            let messages_value = match options.get("messages") {
+                                Some(v) => v.clone(),
+                                None => {
+                                    return serde_json::json!({
+                                        "__error": "Missing required field: messages"
+                                    }).to_string();
+                                }
+                            };
+
+                            let messages: Vec<OllamaMessage> = match serde_json::from_value(messages_value) {
+                                Ok(m) => m,
+                                Err(e) => {
+                                    return serde_json::json!({
+                                        "__error": format!("Failed to parse messages: {}", e)
+                                    }).to_string();
+                                }
+                            };
+
+                            // Extract optional model (default to config model)
+                            let model = options.get("model")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(&default_model)
+                                .to_string();
+
+                            // Build LLM request
+                            let request = OllamaRequest {
+                                model,
+                                prompt: None,
+                                stream: false,
+                                think: false,
+                                options: OllamaOptions {
+                                    num_ctx: 8192, // Default context size
+                                },
+                                messages,
+                                tools: vec![], // No tool support for now
+                                tool_choice: None,
+                            };
+
+                            // Execute LLM request
+                            match crate::llm::execute_request(request, &config, true, None).await {
+                                Ok(response) => {
+                                    serde_json::json!({
+                                        "content": response.content,
+                                        "tool_calls": response.tool_calls
+                                    }).to_string()
+                                }
+                                Err(e) => {
+                                    serde_json::json!({
+                                        "__error": format!("LLM request failed: {}", e)
+                                    }).to_string()
+                                }
+                            }
+                        })
+                    } else {
+                        serde_json::json!({
+                            "__error": "No tokio runtime available"
+                        }).to_string()
+                    }
+                })?;
+                ctx.globals().set("__rust_call_llm", call_llm_fn)?;
+
+                Ok::<(), anyhow::Error>(())
+            })?;
+        }
+
+        // Inject process_conversation function if llm_config is available
+        if let (Some(llm_config), Some(llm_model)) = (&self.llm_config, &self.llm_model) {
+            ctx.with(|ctx| {
+                let llm_config_clone = llm_config.clone();
+                let llm_model_clone = llm_model.clone();
+                let js_config_clone = self.config.clone();
+                let enabled_plugins_clone = self.enabled_plugins.clone();
+                let disabled_plugins_clone = self.disabled_plugins.clone();
+                let database_clone = self.database.clone();
+                let account_id_clone = self.account_id.borrow().clone();
+
+                // process_conversation(messages) -> object
+                let process_conversation_fn = Function::new(ctx.clone(), move |messages_json: String| -> String {
+                    if let Some(h) = tokio::runtime::Handle::try_current().ok() {
+                        let config = llm_config_clone.clone();
+                        let model = llm_model_clone.clone();
+                        let js_config = js_config_clone.clone();
+                        let enabled_plugins = enabled_plugins_clone.clone();
+                        let disabled_plugins = disabled_plugins_clone.clone();
+                        let database = database_clone.clone();
+                        let account_id = account_id_clone.clone();
+
+                        h.block_on(async move {
+                            // Parse messages
+                            let messages: Vec<OllamaMessage> = match serde_json::from_str(&messages_json) {
+                                Ok(m) => m,
+                                Err(e) => {
+                                    return serde_json::json!({
+                                        "__error": format!("Failed to parse messages: {}", e)
+                                    }).to_string();
+                                }
+                            };
+
+                            // Create tool registry
+                            let tool_registry = match crate::tools::ToolRegistry::new(
+                                js_config.clone(),
+                                None, // enabled_tools - use all tools
+                                None, // disabled_tools
+                                database.clone(),
+                                Some(account_id.clone())
+                            ) {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    return serde_json::json!({
+                                        "__error": format!("Failed to create tool registry: {}", e)
+                                    }).to_string();
+                                }
+                            };
+
+                            // Create plugin registry
+                            let plugin_registry = match crate::plugins::PluginRegistry::new(
+                                js_config,
+                                enabled_plugins,
+                                disabled_plugins,
+                                database,
+                                Some(account_id),
+                                Some(config.clone()),
+                                Some(model.clone())
+                            ) {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    return serde_json::json!({
+                                        "__error": format!("Failed to create plugin registry: {}", e)
+                                    }).to_string();
+                                }
+                            };
+
+                            // Execute conversation loop
+                            match crate::execute_conversation_loop(
+                                messages,
+                                &config,
+                                &model,
+                                8192, // Default context size
+                                &tool_registry,
+                                &plugin_registry
+                            ).await {
+                                Ok(response) => {
+                                    serde_json::json!({
+                                        "content": response
+                                    }).to_string()
+                                }
+                                Err(e) => {
+                                    serde_json::json!({
+                                        "__error": format!("Conversation loop failed: {}", e)
+                                    }).to_string()
+                                }
+                            }
+                        })
+                    } else {
+                        serde_json::json!({
+                            "__error": "No tokio runtime available"
+                        }).to_string()
+                    }
+                })?;
+                ctx.globals().set("__rust_process_conversation", process_conversation_fn)?;
+
                 Ok::<(), anyhow::Error>(())
             })?;
         }

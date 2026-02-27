@@ -432,3 +432,166 @@ pub async fn run_conversation(
     Ok(assistant_response)
 }
 
+/// Execute a conversation loop with tools and plugins
+/// This is the core conversation logic used by CLI, proxy, and plugins
+/// Returns the final assistant response
+pub async fn execute_conversation_loop(
+    messages: Vec<OllamaMessage>,
+    llm_config: &LlmConfig,
+    llm_model: &str,
+    context_size: u32,
+    tool_registry: &ToolRegistry,
+    plugin_registry: &PluginRegistry,
+) -> Result<String> {
+    let mut conversation_messages = messages;
+    let mut assistant_response = String::new();
+
+    loop {
+        // Get tools from registry
+        let combined_tools = tool_registry.get_llm_tools();
+
+        // Build LLM request
+        let mut current_request = OllamaRequest {
+            model: llm_model.to_string(),
+            prompt: None,
+            stream: false,
+            think: false,
+            options: OllamaOptions {
+                num_ctx: context_size,
+            },
+            messages: conversation_messages.clone(),
+            tools: combined_tools,
+            tool_choice: Some("auto".to_string()),
+        };
+
+        // Execute pre_request plugin hook
+        let request_data = serde_json::json!({
+            "messages": current_request.messages,
+            "tools": current_request.tools,
+            "options": {
+                "num_ctx": current_request.options.num_ctx
+            }
+        });
+
+        if let Ok(modified_data) = plugin_registry.execute_hook("pre_request", request_data) {
+            // Update request with modified data
+            if let Some(messages) = modified_data.get("messages") {
+                if let Ok(updated_messages) = serde_json::from_value(messages.clone()) {
+                    current_request.messages = updated_messages;
+                }
+            }
+        }
+
+        // Execute LLM request
+        let llm_response = llm::execute_request(
+            current_request,
+            llm_config,
+            true, // headless mode
+            None, // no stream callback
+        ).await?;
+
+        // Extract content and tool calls from response
+        let final_content = llm_response.content;
+        let final_tool_calls = llm_response.tool_calls;
+
+        // Store the assistant's response
+        assistant_response = final_content.clone();
+
+        // If no tool calls, we're done
+        if final_tool_calls.is_empty() {
+            // Add final assistant message to conversation
+            conversation_messages.push(OllamaMessage {
+                role: "assistant".to_string(),
+                content: final_content,
+                tool_calls: vec![],
+            });
+
+            break;
+        }
+
+        // Add assistant message with tool calls to conversation
+        conversation_messages.push(OllamaMessage {
+            role: "assistant".to_string(),
+            content: final_content.clone(),
+            tool_calls: final_tool_calls.clone(),
+        });
+
+        // Execute tool calls
+        for tool_call in &final_tool_calls {
+            let tool_name = &tool_call.function.name;
+            let mut args_value = tool_call.function.arguments.clone();
+
+            // Execute on_tool_call plugin hook
+            let tool_call_data = serde_json::json!({
+                "tool_name": tool_name,
+                "arguments": args_value
+            });
+            if let Ok(modified_tool_data) = plugin_registry.execute_hook("on_tool_call", tool_call_data) {
+                // Update arguments with modified data
+                if let Some(modified_args) = modified_tool_data.get("arguments") {
+                    args_value = modified_args.clone();
+                }
+            }
+
+            match tool_registry.execute(tool_name, args_value.clone()) {
+                Ok(mut result) => {
+                    // Execute on_tool_result plugin hook
+                    let tool_result_data = serde_json::json!({
+                        "tool_name": tool_name,
+                        "arguments": args_value,
+                        "result": result
+                    });
+                    if let Ok(modified_result_data) = plugin_registry.execute_hook("on_tool_result", tool_result_data) {
+                        // Update result with modified data
+                        if let Some(modified_result) = modified_result_data.get("result") {
+                            result = modified_result.clone();
+                        }
+                    }
+
+                    // Add tool result to conversation
+                    conversation_messages.push(OllamaMessage {
+                        role: "tool".to_string(),
+                        content: serde_json::to_string(&result)?,
+                        tool_calls: vec![],
+                    });
+                }
+                Err(e) => {
+                    // Add error to conversation
+                    conversation_messages.push(OllamaMessage {
+                        role: "tool".to_string(),
+                        content: format!("{{\"error\": \"{}\"}}", e),
+                        tool_calls: vec![],
+                    });
+                }
+            }
+        }
+
+        // Continue loop to send tool results back to LLM
+    }
+
+    // Execute post_response plugin hook
+    let response_data = serde_json::json!({
+        "content": assistant_response
+    });
+    if let Ok(modified_response) = plugin_registry.execute_hook("post_response", response_data) {
+        // Update assistant_response with modified content
+        if let Some(modified_content) = modified_response.get("content") {
+            if let Some(content_str) = modified_content.as_str() {
+                assistant_response = content_str.to_string();
+            }
+        }
+    }
+
+    // Execute on_conversation_turn plugin hook
+    let turn_data = serde_json::json!({
+        "user_message": conversation_messages.first(),
+        "assistant_message": assistant_response.clone(),
+        "tool_calls_count": conversation_messages.iter()
+            .filter(|m| m.role == "assistant" && !m.tool_calls.is_empty())
+            .count()
+    });
+    let _ = plugin_registry.execute_hook("on_conversation_turn", turn_data);
+
+    Ok(assistant_response)
+}
+

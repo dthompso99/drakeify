@@ -218,6 +218,129 @@ impl Database {
         Ok(rows_affected > 0)
     }
 
+    /// Get a session by session_id and account_id
+    pub async fn get_session(&self, session_id: &str, account_id: &str) -> Result<Option<(String, String)>> {
+        debug!("Getting session: {} for account: {}", session_id, account_id);
+
+        let result = match self {
+            Database::Sqlite(pool) => {
+                sqlx::query_as::<_, (String, String)>(
+                    "SELECT messages, metadata FROM sessions WHERE session_id = ? AND account_id = ?"
+                )
+                    .bind(session_id)
+                    .bind(account_id)
+                    .fetch_optional(pool)
+                    .await?
+            }
+            Database::Postgres(pool) => {
+                sqlx::query_as::<_, (String, String)>(
+                    "SELECT messages, metadata FROM sessions WHERE session_id = $1 AND account_id = $2"
+                )
+                    .bind(session_id)
+                    .bind(account_id)
+                    .fetch_optional(pool)
+                    .await?
+            }
+        };
+
+        Ok(result)
+    }
+
+    /// Create or update a session
+    pub async fn upsert_session(
+        &self,
+        session_id: &str,
+        account_id: &str,
+        messages: &str,
+        metadata: &str,
+    ) -> Result<()> {
+        debug!("Upserting session: {} for account: {}", session_id, account_id);
+
+        match self {
+            Database::Sqlite(pool) => {
+                sqlx::query(
+                    "INSERT OR REPLACE INTO sessions (session_id, account_id, messages, metadata, created_at, updated_at)
+                     VALUES (?, ?, ?, ?, COALESCE((SELECT created_at FROM sessions WHERE session_id = ?), datetime('now')), datetime('now'))"
+                )
+                    .bind(session_id)
+                    .bind(account_id)
+                    .bind(messages)
+                    .bind(metadata)
+                    .bind(session_id)
+                    .execute(pool)
+                    .await?;
+            }
+            Database::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO sessions (session_id, account_id, messages, metadata, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, NOW(), NOW())
+                     ON CONFLICT (session_id) DO UPDATE
+                     SET account_id = $2, messages = $3, metadata = $4, updated_at = NOW()"
+                )
+                    .bind(session_id)
+                    .bind(account_id)
+                    .bind(messages)
+                    .bind(metadata)
+                    .execute(pool)
+                    .await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Delete a session
+    pub async fn delete_session(&self, session_id: &str, account_id: &str) -> Result<bool> {
+        debug!("Deleting session: {} for account: {}", session_id, account_id);
+
+        let rows_affected = match self {
+            Database::Sqlite(pool) => {
+                sqlx::query("DELETE FROM sessions WHERE session_id = ? AND account_id = ?")
+                    .bind(session_id)
+                    .bind(account_id)
+                    .execute(pool)
+                    .await?
+                    .rows_affected()
+            }
+            Database::Postgres(pool) => {
+                sqlx::query("DELETE FROM sessions WHERE session_id = $1 AND account_id = $2")
+                    .bind(session_id)
+                    .bind(account_id)
+                    .execute(pool)
+                    .await?
+                    .rows_affected()
+            }
+        };
+
+        Ok(rows_affected > 0)
+    }
+
+    /// List all sessions for an account
+    pub async fn list_sessions(&self, account_id: &str) -> Result<Vec<String>> {
+        debug!("Listing sessions for account: {}", account_id);
+
+        let sessions = match self {
+            Database::Sqlite(pool) => {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT session_id FROM sessions WHERE account_id = ? ORDER BY updated_at DESC"
+                )
+                    .bind(account_id)
+                    .fetch_all(pool)
+                    .await?
+            }
+            Database::Postgres(pool) => {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT session_id FROM sessions WHERE account_id = $1 ORDER BY updated_at DESC"
+                )
+                    .bind(account_id)
+                    .fetch_all(pool)
+                    .await?
+            }
+        };
+
+        Ok(sessions)
+    }
+
     /// Sanitize database URL for logging (hide passwords)
     fn sanitize_url(url: &str) -> String {
         if let Some(at_pos) = url.find('@') {

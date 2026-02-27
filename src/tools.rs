@@ -53,11 +53,12 @@ pub struct ToolRegistry {
     enabled_tools: Option<Vec<String>>,
     disabled_tools: Option<Vec<String>>,
     database: Option<std::sync::Arc<Database>>,
+    account_id: String,
 }
 
 impl ToolRegistry {
     /// Create a new tool registry with a QuickJS runtime
-    pub fn new(config: JsRuntimeConfig, enabled_tools: Option<Vec<String>>, disabled_tools: Option<Vec<String>>, database: Option<std::sync::Arc<Database>>) -> Result<Self> {
+    pub fn new(config: JsRuntimeConfig, enabled_tools: Option<Vec<String>>, disabled_tools: Option<Vec<String>>, database: Option<std::sync::Arc<Database>>, account_id: Option<String>) -> Result<Self> {
         let js_runtime = Runtime::new()?;
 
         // Setup globals in the runtime
@@ -71,6 +72,7 @@ impl ToolRegistry {
             enabled_tools,
             disabled_tools,
             database,
+            account_id: account_id.unwrap_or_else(|| "anonymous".to_string()),
         })
     }
 
@@ -446,6 +448,16 @@ impl ToolRegistry {
                 Ok::<(), anyhow::Error>(())
             })?;
         }
+
+        // Inject get_account_id function (read-only for tools)
+        ctx.with(|ctx| {
+            let account_id_clone = self.account_id.clone();
+            let get_account_id_fn = Function::new(ctx.clone(), move || -> String {
+                account_id_clone.clone()
+            })?;
+            ctx.globals().set("get_account_id", get_account_id_fn)?;
+            Ok::<(), anyhow::Error>(())
+        })?;
 
         ctx.with(|ctx| {
             // Evaluate the tool code to get the tool object
