@@ -907,7 +907,7 @@ impl PluginRegistry {
                                     messages,
                                     &config,
                                     &model,
-                                    8192, // Default context size
+                                    32768, // Default context size (match proxy default)
                                     &tool_registry,
                                     &plugin_registry
                                 ).await {
