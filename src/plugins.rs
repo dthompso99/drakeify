@@ -504,47 +504,59 @@ impl PluginRegistry {
 
                 // get_session(session_id) -> object | null
                 let get_session_fn = Function::new(ctx.clone(), move |session_id: String| -> String {
+                    let db_clone = database_clone.clone();
+                    let account_id = account_id_clone.borrow().clone();
+
+                    // Use a channel to get the result from the async task
+                    let (tx, rx) = std::sync::mpsc::channel();
+
                     if let Some(h) = tokio::runtime::Handle::try_current().ok() {
-                        let db_clone = database_clone.clone();
-                        let account_id = account_id_clone.borrow().clone();
+                        h.spawn(async move {
+                            let result = async move {
+                                match db_clone.get_session(&session_id, &account_id).await {
+                                    Ok(Some((messages_json, metadata_json))) => {
+                                        // Parse the JSON strings from the database
+                                        let messages: serde_json::Value = match serde_json::from_str(&messages_json) {
+                                            Ok(v) => v,
+                                            Err(e) => {
+                                                return serde_json::json!({
+                                                    "__error": format!("Failed to parse messages JSON: {}", e)
+                                                }).to_string();
+                                            }
+                                        };
 
-                        h.block_on(async move {
-                            match db_clone.get_session(&session_id, &account_id).await {
-                                Ok(Some((messages_json, metadata_json))) => {
-                                    // Parse the JSON strings from the database
-                                    let messages: serde_json::Value = match serde_json::from_str(&messages_json) {
-                                        Ok(v) => v,
-                                        Err(e) => {
-                                            return serde_json::json!({
-                                                "__error": format!("Failed to parse messages JSON: {}", e)
-                                            }).to_string();
-                                        }
-                                    };
+                                        let metadata: serde_json::Value = match serde_json::from_str(&metadata_json) {
+                                            Ok(v) => v,
+                                            Err(e) => {
+                                                return serde_json::json!({
+                                                    "__error": format!("Failed to parse metadata JSON: {}", e)
+                                                }).to_string();
+                                            }
+                                        };
 
-                                    let metadata: serde_json::Value = match serde_json::from_str(&metadata_json) {
-                                        Ok(v) => v,
-                                        Err(e) => {
-                                            return serde_json::json!({
-                                                "__error": format!("Failed to parse metadata JSON: {}", e)
-                                            }).to_string();
-                                        }
-                                    };
-
-                                    // Return session object with parsed messages and metadata
-                                    serde_json::json!({
-                                        "messages": messages,
-                                        "metadata": metadata
-                                    }).to_string()
+                                        // Return session object with parsed messages and metadata
+                                        serde_json::json!({
+                                            "messages": messages,
+                                            "metadata": metadata
+                                        }).to_string()
+                                    }
+                                    Ok(None) => "null".to_string(),
+                                    Err(e) => {
+                                        // Throw error by returning error JSON
+                                        serde_json::json!({
+                                            "__error": format!("Failed to get session: {}", e)
+                                        }).to_string()
+                                    }
                                 }
-                                Ok(None) => "null".to_string(),
-                                Err(e) => {
-                                    // Throw error by returning error JSON
-                                    serde_json::json!({
-                                        "__error": format!("Failed to get session: {}", e)
-                                    }).to_string()
-                                }
-                            }
-                        })
+                            }.await;
+                            let _ = tx.send(result);
+                        });
+
+                        // Wait for the result with a timeout
+                        rx.recv_timeout(std::time::Duration::from_secs(10))
+                            .unwrap_or_else(|_| serde_json::json!({
+                                "__error": "Session fetch timed out"
+                            }).to_string())
                     } else {
                         serde_json::json!({
                             "__error": "No tokio runtime available"
@@ -558,43 +570,55 @@ impl PluginRegistry {
 
                 // set_session(session_id, session_data) -> void
                 let set_session_fn = Function::new(ctx.clone(), move |session_id: String, session_data_json: String| -> String {
+                    let db_clone = database_clone2.clone();
+                    let account_id = account_id_clone2.borrow().clone();
+
+                    // Use a channel to get the result from the async task
+                    let (tx, rx) = std::sync::mpsc::channel();
+
                     if let Some(h) = tokio::runtime::Handle::try_current().ok() {
-                        let db_clone = database_clone2.clone();
-                        let account_id = account_id_clone2.borrow().clone();
+                        h.spawn(async move {
+                            let result = async move {
+                                // Parse session data
+                                let session_data: serde_json::Value = match serde_json::from_str(&session_data_json) {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        return serde_json::json!({
+                                            "__error": format!("Failed to parse session data: {}", e)
+                                        }).to_string();
+                                    }
+                                };
 
-                        h.block_on(async move {
-                            // Parse session data
-                            let session_data: serde_json::Value = match serde_json::from_str(&session_data_json) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    return serde_json::json!({
-                                        "__error": format!("Failed to parse session data: {}", e)
-                                    }).to_string();
+                                // Extract messages and metadata
+                                let messages = session_data.get("messages")
+                                    .cloned()
+                                    .unwrap_or(serde_json::json!([]));
+
+                                let metadata = session_data.get("metadata")
+                                    .and_then(|v| serde_json::from_value::<SessionMetadata>(v.clone()).ok())
+                                    .unwrap_or_default();
+
+                                // Serialize to strings for database
+                                let messages_str = messages.to_string();
+                                let metadata_str = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
+
+                                match db_clone.upsert_session(&session_id, &account_id, &messages_str, &metadata_str).await {
+                                    Ok(_) => serde_json::json!({ "success": true }).to_string(),
+                                    Err(e) => {
+                                        serde_json::json!({
+                                            "__error": format!("Failed to save session: {}", e)
+                                        }).to_string()
+                                    }
                                 }
-                            };
+                            }.await;
+                            let _ = tx.send(result);
+                        });
 
-                            // Extract messages and metadata
-                            let messages = session_data.get("messages")
-                                .cloned()
-                                .unwrap_or(serde_json::json!([]));
-
-                            let metadata = session_data.get("metadata")
-                                .and_then(|v| serde_json::from_value::<SessionMetadata>(v.clone()).ok())
-                                .unwrap_or_default();
-
-                            // Serialize to strings for database
-                            let messages_str = messages.to_string();
-                            let metadata_str = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
-
-                            match db_clone.upsert_session(&session_id, &account_id, &messages_str, &metadata_str).await {
-                                Ok(_) => serde_json::json!({ "success": true }).to_string(),
-                                Err(e) => {
-                                    serde_json::json!({
-                                        "__error": format!("Failed to save session: {}", e)
-                                    }).to_string()
-                                }
-                            }
-                        })
+                        // Wait for the result with a timeout
+                        rx.recv_timeout(std::time::Duration::from_secs(10))
+                            .unwrap_or_else(|_| serde_json::json!({
+                                "__error": "Session save timed out"
+                            }).to_string())
                     } else {
                         serde_json::json!({
                             "__error": "No tokio runtime available"
