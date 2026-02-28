@@ -452,23 +452,36 @@ impl PluginRegistry {
             ctx.with(|ctx| {
                 let database_clone = db.clone();
                 let get_config_fn = Function::new(ctx.clone(), move |scope: String| -> String {
-                    // Use blocking call to get config from database
+                    let db_clone = database_clone.clone();
+                    let scope_clone = scope.clone();
+
+                    // Use a channel to get the result from the async task
+                    let (tx, rx) = std::sync::mpsc::channel();
+
                     if let Some(h) = tokio::runtime::Handle::try_current().ok() {
-                        let db_clone = database_clone.clone();
-                        let config_json = h.block_on(async move {
-                            match db_clone.get_plugin_config(&scope).await {
-                                Ok(Some(config)) => config,
-                                Ok(None) => {
-                                    warn!("Config not found for scope: {}", scope);
-                                    "{}".to_string()
+                        h.spawn(async move {
+                            let result = async move {
+                                match db_clone.get_plugin_config(&scope_clone).await {
+                                    Ok(Some(config)) => config,
+                                    Ok(None) => {
+                                        warn!("Config not found for scope: {}", scope_clone);
+                                        "{}".to_string()
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to get config for scope {}: {}", scope_clone, e);
+                                        "{}".to_string()
+                                    }
                                 }
-                                Err(e) => {
-                                    warn!("Failed to get config for scope {}: {}", scope, e);
-                                    "{}".to_string()
-                                }
-                            }
+                            }.await;
+                            let _ = tx.send(result);
                         });
-                        config_json
+
+                        // Wait for the result with a timeout
+                        rx.recv_timeout(std::time::Duration::from_secs(10))
+                            .unwrap_or_else(|_| {
+                                warn!("Config fetch timed out for scope: {}", scope);
+                                "{}".to_string()
+                            })
                     } else {
                         warn!("No tokio runtime available for get_config");
                         "{}".to_string()
