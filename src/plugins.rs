@@ -705,7 +705,7 @@ impl PluginRegistry {
                 let enabled_plugins_clone = self.enabled_plugins.clone();
                 let disabled_plugins_clone = self.disabled_plugins.clone();
                 let database_clone = self.database.clone();
-                let account_id_clone = self.account_id.borrow().clone();
+                let account_id_rc = self.account_id.clone(); // Clone the Rc<RefCell>, not the inner value
 
                 // process_conversation(messages) -> object
                 let process_conversation_fn = Function::new(ctx.clone(), move |messages_json: String| -> String {
@@ -716,7 +716,7 @@ impl PluginRegistry {
                         let enabled_plugins = enabled_plugins_clone.clone();
                         let disabled_plugins = disabled_plugins_clone.clone();
                         let database = database_clone.clone();
-                        let account_id = account_id_clone.clone();
+                        let account_id = account_id_rc.borrow().clone(); // Read current value at call time
 
                         h.block_on(async move {
                             // Parse messages
