@@ -282,15 +282,13 @@ impl PluginRegistry {
                     // Interpolate secrets if database is available
                     if let Some(ref db) = database_clone {
                         if let Some(h) = tokio::runtime::Handle::try_current().ok() {
-                            let (tx, rx) = std::sync::mpsc::channel();
                             let db_clone = db.clone();
                             let url_clone = final_url.clone();
-                            h.spawn(async move {
-                                let result = interpolate_secrets_sync(&url_clone, &db_clone).await;
-                                let _ = tx.send(result);
+                            final_url = tokio::task::block_in_place(|| {
+                                h.block_on(async move {
+                                    interpolate_secrets_sync(&url_clone, &db_clone).await
+                                })
                             });
-                            final_url = rx.recv_timeout(std::time::Duration::from_secs(10))
-                                .unwrap_or(final_url);
                         }
                     }
 
@@ -314,26 +312,22 @@ impl PluginRegistry {
                     if let Some(ref db) = database_clone2 {
                         if let Some(h) = tokio::runtime::Handle::try_current().ok() {
                             // Interpolate URL
-                            let (tx, rx) = std::sync::mpsc::channel();
                             let db_clone = db.clone();
                             let url_clone = final_url.clone();
-                            h.spawn(async move {
-                                let result = interpolate_secrets_sync(&url_clone, &db_clone).await;
-                                let _ = tx.send(result);
+                            final_url = tokio::task::block_in_place(|| {
+                                h.block_on(async move {
+                                    interpolate_secrets_sync(&url_clone, &db_clone).await
+                                })
                             });
-                            final_url = rx.recv_timeout(std::time::Duration::from_secs(10))
-                                .unwrap_or(final_url);
 
                             // Interpolate body
-                            let (tx, rx) = std::sync::mpsc::channel();
                             let db_clone2 = db.clone();
                             let body_clone = final_body.clone();
-                            h.spawn(async move {
-                                let result = interpolate_secrets_sync(&body_clone, &db_clone2).await;
-                                let _ = tx.send(result);
+                            final_body = tokio::task::block_in_place(|| {
+                                h.block_on(async move {
+                                    interpolate_secrets_sync(&body_clone, &db_clone2).await
+                                })
                             });
-                            final_body = rx.recv_timeout(std::time::Duration::from_secs(10))
-                                .unwrap_or(final_body);
                         }
                     }
 
@@ -386,42 +380,37 @@ impl PluginRegistry {
                     if let Some(ref db) = database_clone {
                         if let Some(h) = tokio::runtime::Handle::try_current().ok() {
                             // Interpolate URL
-                            let (tx, rx) = std::sync::mpsc::channel();
                             let db_clone = db.clone();
                             let url_clone = url.clone();
-                            h.spawn(async move {
-                                let result = interpolate_secrets_sync(&url_clone, &db_clone).await;
-                                let _ = tx.send(result);
+                            url = tokio::task::block_in_place(|| {
+                                h.block_on(async move {
+                                    interpolate_secrets_sync(&url_clone, &db_clone).await
+                                })
                             });
-                            url = rx.recv_timeout(std::time::Duration::from_secs(10))
-                                .unwrap_or(url);
 
                             // Interpolate in headers
-                            let (tx, rx) = std::sync::mpsc::channel();
                             let headers_clone = headers.clone();
                             let db_clone2 = db.clone();
-                            h.spawn(async move {
-                                let mut result = HashMap::new();
-                                for (k, v) in headers_clone {
-                                    let interpolated = interpolate_secrets_sync(&v, &db_clone2).await;
-                                    result.insert(k, interpolated);
-                                }
-                                let _ = tx.send(result);
+                            headers = tokio::task::block_in_place(|| {
+                                h.block_on(async move {
+                                    let mut result = HashMap::new();
+                                    for (k, v) in headers_clone {
+                                        let interpolated = interpolate_secrets_sync(&v, &db_clone2).await;
+                                        result.insert(k, interpolated);
+                                    }
+                                    result
+                                })
                             });
-                            headers = rx.recv_timeout(std::time::Duration::from_secs(10))
-                                .unwrap_or(headers);
 
                             // Interpolate in body
                             if let Some(ref b) = body {
-                                let (tx, rx) = std::sync::mpsc::channel();
                                 let body_clone = b.clone();
                                 let db_clone3 = db.clone();
-                                h.spawn(async move {
-                                    let result = interpolate_secrets_sync(&body_clone, &db_clone3).await;
-                                    let _ = tx.send(result);
-                                });
-                                body = rx.recv_timeout(std::time::Duration::from_secs(10))
-                                    .ok();
+                                body = Some(tokio::task::block_in_place(|| {
+                                    h.block_on(async move {
+                                        interpolate_secrets_sync(&body_clone, &db_clone3).await
+                                    })
+                                }));
                             }
                         }
                     }
