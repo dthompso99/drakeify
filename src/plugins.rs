@@ -284,14 +284,17 @@ impl PluginRegistry {
                         if let Some(h) = tokio::runtime::Handle::try_current().ok() {
                             let db_clone = db.clone();
                             let url_clone = final_url.clone();
+                            eprintln!("[DEBUG] [Plugin HTTP GET] BEFORE interpolation: {}", url_clone);
                             final_url = tokio::task::block_in_place(|| {
                                 h.block_on(async move {
                                     interpolate_secrets_sync(&url_clone, &db_clone).await
                                 })
                             });
+                            eprintln!("[DEBUG] [Plugin HTTP GET] AFTER interpolation: {}", final_url);
                         }
                     }
 
+                    eprintln!("[DEBUG] [Plugin HTTP GET] Final URL being sent: {}", final_url);
                     match http_get_sync(final_url, &config_clone) {
                         Ok(data) => data,
                         Err(e) => {
@@ -314,23 +317,29 @@ impl PluginRegistry {
                             // Interpolate URL
                             let db_clone = db.clone();
                             let url_clone = final_url.clone();
+                            eprintln!("[DEBUG] [Plugin HTTP POST] BEFORE URL interpolation: {}", url_clone);
                             final_url = tokio::task::block_in_place(|| {
                                 h.block_on(async move {
                                     interpolate_secrets_sync(&url_clone, &db_clone).await
                                 })
                             });
+                            eprintln!("[DEBUG] [Plugin HTTP POST] AFTER URL interpolation: {}", final_url);
 
                             // Interpolate body
                             let db_clone2 = db.clone();
                             let body_clone = final_body.clone();
+                            eprintln!("[DEBUG] [Plugin HTTP POST] BEFORE body interpolation: {}", body_clone);
                             final_body = tokio::task::block_in_place(|| {
                                 h.block_on(async move {
                                     interpolate_secrets_sync(&body_clone, &db_clone2).await
                                 })
                             });
+                            eprintln!("[DEBUG] [Plugin HTTP POST] AFTER body interpolation: {}", final_body);
                         }
                     }
 
+                    eprintln!("[DEBUG] [Plugin HTTP POST] Final URL: {}", final_url);
+                    eprintln!("[DEBUG] [Plugin HTTP POST] Final body: {}", final_body);
                     match http_post_sync(final_url, final_body, &config_clone2) {
                         Ok(data) => data,
                         Err(e) => {
@@ -382,15 +391,18 @@ impl PluginRegistry {
                             // Interpolate URL
                             let db_clone = db.clone();
                             let url_clone = url.clone();
+                            eprintln!("[DEBUG] [Plugin HTTP REQUEST] BEFORE URL interpolation: {}", url_clone);
                             url = tokio::task::block_in_place(|| {
                                 h.block_on(async move {
                                     interpolate_secrets_sync(&url_clone, &db_clone).await
                                 })
                             });
+                            eprintln!("[DEBUG] [Plugin HTTP REQUEST] AFTER URL interpolation: {}", url);
 
                             // Interpolate in headers
                             let headers_clone = headers.clone();
                             let db_clone2 = db.clone();
+                            eprintln!("[DEBUG] [Plugin HTTP REQUEST] BEFORE headers interpolation: {:?}", headers_clone);
                             headers = tokio::task::block_in_place(|| {
                                 h.block_on(async move {
                                     let mut result = HashMap::new();
@@ -401,19 +413,26 @@ impl PluginRegistry {
                                     result
                                 })
                             });
+                            eprintln!("[DEBUG] [Plugin HTTP REQUEST] AFTER headers interpolation: {:?}", headers);
 
                             // Interpolate in body
                             if let Some(ref b) = body {
                                 let body_clone = b.clone();
                                 let db_clone3 = db.clone();
+                                eprintln!("[DEBUG] [Plugin HTTP REQUEST] BEFORE body interpolation: {}", body_clone);
                                 body = Some(tokio::task::block_in_place(|| {
                                     h.block_on(async move {
                                         interpolate_secrets_sync(&body_clone, &db_clone3).await
                                     })
                                 }));
+                                eprintln!("[DEBUG] [Plugin HTTP REQUEST] AFTER body interpolation: {:?}", body);
                             }
                         }
                     }
+
+                    eprintln!("[DEBUG] [Plugin HTTP REQUEST] Final URL: {}", url);
+                    eprintln!("[DEBUG] [Plugin HTTP REQUEST] Final headers: {:?}", headers);
+                    eprintln!("[DEBUG] [Plugin HTTP REQUEST] Final body: {:?}", body);
 
                     let options = HttpRequestOptions {
                         method: options_value.get("method")
