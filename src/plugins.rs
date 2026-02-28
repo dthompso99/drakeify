@@ -580,7 +580,7 @@ impl PluginRegistry {
                             let metadata_str = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
 
                             match db_clone.upsert_session(&session_id, &account_id, &messages_str, &metadata_str).await {
-                                Ok(_) => "null".to_string(),
+                                Ok(_) => serde_json::json!({ "success": true }).to_string(),
                                 Err(e) => {
                                     serde_json::json!({
                                         "__error": format!("Failed to save session: {}", e)
