@@ -833,6 +833,10 @@ impl PluginRegistry {
                                     }).to_string();
                                 }
 
+                                // Debug: Log loaded tools
+                                let tool_names = tool_registry.list_tools();
+                                eprintln!("[process_conversation] Loaded {} tools: {:?}", tool_names.len(), tool_names);
+
                                 // Create plugin registry
                                 let mut plugin_registry = match crate::plugins::PluginRegistry::new(
                                     js_config,
