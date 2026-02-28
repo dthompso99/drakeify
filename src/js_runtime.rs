@@ -504,6 +504,51 @@ fn setup_http_fetch(ctx: &rquickjs::Ctx, _config: &JsRuntimeConfig) -> Result<()
             }
         };
 
+        // Add method shortcuts to http object
+        globalThis.http.get = function(options) {
+            if (typeof options === 'string') {
+                options = { url: options };
+            }
+            options.method = 'GET';
+            return globalThis.http(options);
+        };
+
+        globalThis.http.post = function(options) {
+            if (typeof options === 'string') {
+                options = { url: options };
+            }
+            options.method = 'POST';
+            return globalThis.http(options);
+        };
+
+        globalThis.http.put = function(options) {
+            if (typeof options === 'string') {
+                options = { url: options };
+            }
+            options.method = 'PUT';
+            return globalThis.http(options);
+        };
+
+        globalThis.http.delete = function(options) {
+            if (typeof options === 'string') {
+                options = { url: options };
+            }
+            options.method = 'DELETE';
+            return globalThis.http(options);
+        };
+
+        globalThis.http.patch = function(options) {
+            if (typeof options === 'string') {
+                options = { url: options };
+            }
+            options.method = 'PATCH';
+            return globalThis.http(options);
+        };
+
+        globalThis.http.request = function(options) {
+            return globalThis.http(options);
+        };
+
         // HTTP GET wrapper (legacy, kept for compatibility)
         globalThis.httpGet = function(url) {
             try {
