@@ -227,16 +227,23 @@ impl PluginRegistry {
     /// Execute a hook with the given data
     /// Returns the modified data after all plugins have processed it
     pub fn execute_hook(&self, hook_name: &str, mut data: Value) -> Result<Value> {
-        for plugin in &self.plugins {
-            if plugin.hooks.contains(hook_name) {
-                match self.execute_plugin_hook(&plugin, hook_name, data.clone()) {
-                    Ok(modified_data) => {
-                        data = modified_data;
-                    }
-                    Err(e) => {
-                        eprintln!("Error executing plugin '{}' hook '{}': {}", plugin.name, hook_name, e);
-                        // Continue with unmodified data
-                    }
+        let plugins_with_hook: Vec<&Plugin> = self.plugins.iter()
+            .filter(|p| p.hooks.contains(hook_name))
+            .collect();
+
+        if !plugins_with_hook.is_empty() {
+            tracing::debug!("Executing {} hook for {} plugin(s)", hook_name, plugins_with_hook.len());
+        }
+
+        for plugin in plugins_with_hook {
+            tracing::debug!("  → Executing {} hook for plugin: {}", hook_name, plugin.name);
+            match self.execute_plugin_hook(&plugin, hook_name, data.clone()) {
+                Ok(modified_data) => {
+                    data = modified_data;
+                }
+                Err(e) => {
+                    eprintln!("Error executing plugin '{}' hook '{}': {}", plugin.name, hook_name, e);
+                    // Continue with unmodified data
                 }
             }
         }
@@ -739,7 +746,7 @@ impl PluginRegistry {
                             };
 
                             // Create plugin registry
-                            let plugin_registry = match crate::plugins::PluginRegistry::new(
+                            let mut plugin_registry = match crate::plugins::PluginRegistry::new(
                                 js_config,
                                 enabled_plugins,
                                 disabled_plugins,
@@ -755,6 +762,13 @@ impl PluginRegistry {
                                     }).to_string();
                                 }
                             };
+
+                            // Load plugins from directory
+                            if let Err(e) = plugin_registry.load_plugins_from_dir("data/plugins") {
+                                return serde_json::json!({
+                                    "__error": format!("Failed to load plugins: {}", e)
+                                }).to_string();
+                            }
 
                             // Execute conversation loop
                             match crate::execute_conversation_loop(
