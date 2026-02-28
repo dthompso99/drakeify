@@ -503,8 +503,27 @@ impl PluginRegistry {
 
                         h.block_on(async move {
                             match db_clone.get_session(&session_id, &account_id).await {
-                                Ok(Some((messages, metadata))) => {
-                                    // Return session object with messages and metadata
+                                Ok(Some((messages_json, metadata_json))) => {
+                                    // Parse the JSON strings from the database
+                                    let messages: serde_json::Value = match serde_json::from_str(&messages_json) {
+                                        Ok(v) => v,
+                                        Err(e) => {
+                                            return serde_json::json!({
+                                                "__error": format!("Failed to parse messages JSON: {}", e)
+                                            }).to_string();
+                                        }
+                                    };
+
+                                    let metadata: serde_json::Value = match serde_json::from_str(&metadata_json) {
+                                        Ok(v) => v,
+                                        Err(e) => {
+                                            return serde_json::json!({
+                                                "__error": format!("Failed to parse metadata JSON: {}", e)
+                                            }).to_string();
+                                        }
+                                    };
+
+                                    // Return session object with parsed messages and metadata
                                     serde_json::json!({
                                         "messages": messages,
                                         "metadata": metadata
