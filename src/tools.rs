@@ -252,8 +252,10 @@ impl ToolRegistry {
                         if let Some(h) = tokio::runtime::Handle::try_current().ok() {
                             let db_clone = db.clone();
                             let url_clone = final_url.clone();
-                            final_url = h.block_on(async move {
-                                interpolate_secrets_sync(&url_clone, &db_clone).await
+                            final_url = tokio::task::block_in_place(|| {
+                                h.block_on(async move {
+                                    interpolate_secrets_sync(&url_clone, &db_clone).await
+                                })
                             });
                         }
                     }
@@ -280,14 +282,18 @@ impl ToolRegistry {
                         if let Some(h) = tokio::runtime::Handle::try_current().ok() {
                             let db_clone = db.clone();
                             let url_clone = final_url.clone();
-                            final_url = h.block_on(async move {
-                                interpolate_secrets_sync(&url_clone, &db_clone).await
+                            final_url = tokio::task::block_in_place(|| {
+                                h.block_on(async move {
+                                    interpolate_secrets_sync(&url_clone, &db_clone).await
+                                })
                             });
 
                             let db_clone2 = db.clone();
                             let body_clone = final_body.clone();
-                            final_body = h.block_on(async move {
-                                interpolate_secrets_sync(&body_clone, &db_clone2).await
+                            final_body = tokio::task::block_in_place(|| {
+                                h.block_on(async move {
+                                    interpolate_secrets_sync(&body_clone, &db_clone2).await
+                                })
                             });
                         }
                     }
@@ -345,28 +351,34 @@ impl ToolRegistry {
                         if let Some(h) = handle {
                             let db_clone = db.clone();
                             let url_clone = url.clone();
-                            url = h.block_on(async move {
-                                interpolate_secrets_sync(&url_clone, &db_clone).await
+                            url = tokio::task::block_in_place(|| {
+                                h.block_on(async move {
+                                    interpolate_secrets_sync(&url_clone, &db_clone).await
+                                })
                             });
 
                             // Interpolate in headers
                             let headers_clone = headers.clone();
                             let db_clone2 = db.clone();
-                            headers = h.block_on(async move {
-                                let mut result = HashMap::new();
-                                for (k, v) in headers_clone {
-                                    let interpolated = interpolate_secrets_sync(&v, &db_clone2).await;
-                                    result.insert(k, interpolated);
-                                }
-                                result
+                            headers = tokio::task::block_in_place(|| {
+                                h.block_on(async move {
+                                    let mut result = HashMap::new();
+                                    for (k, v) in headers_clone {
+                                        let interpolated = interpolate_secrets_sync(&v, &db_clone2).await;
+                                        result.insert(k, interpolated);
+                                    }
+                                    result
+                                })
                             });
 
                             // Interpolate in body
                             if let Some(ref b) = body {
                                 let body_clone = b.clone();
                                 let db_clone3 = db.clone();
-                                body = Some(h.block_on(async move {
-                                    interpolate_secrets_sync(&body_clone, &db_clone3).await
+                                body = Some(tokio::task::block_in_place(|| {
+                                    h.block_on(async move {
+                                        interpolate_secrets_sync(&body_clone, &db_clone3).await
+                                    })
                                 }));
                             }
                         }
@@ -425,20 +437,21 @@ impl ToolRegistry {
                     // Use blocking call to get config from database
                     if let Some(h) = tokio::runtime::Handle::try_current().ok() {
                         let db_clone = database_clone.clone();
-                        let config_json = h.block_on(async move {
-                            match db_clone.get_plugin_config(&scope).await {
-                                Ok(Some(config)) => config,
-                                Ok(None) => {
-                                    warn!("Config not found for scope: {}", scope);
-                                    "{}".to_string()
+                        tokio::task::block_in_place(|| {
+                            h.block_on(async move {
+                                match db_clone.get_plugin_config(&scope).await {
+                                    Ok(Some(config)) => config,
+                                    Ok(None) => {
+                                        warn!("Config not found for scope: {}", scope);
+                                        "{}".to_string()
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to get config for scope {}: {}", scope, e);
+                                        "{}".to_string()
+                                    }
                                 }
-                                Err(e) => {
-                                    warn!("Failed to get config for scope {}: {}", scope, e);
-                                    "{}".to_string()
-                                }
-                            }
-                        });
-                        config_json
+                            })
+                        })
                     } else {
                         warn!("No tokio runtime available for get_config");
                         "{}".to_string()
