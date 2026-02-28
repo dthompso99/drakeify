@@ -20,6 +20,9 @@ pub struct SessionMetadata {
     pub title: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Capture any additional fields (like _webhook_context) that plugins might add
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
 pub struct SessionManager {
@@ -53,6 +56,7 @@ impl SessionManager {
             metadata: SessionMetadata {
                 title: None,
                 tags: Vec::new(),
+                extra: std::collections::HashMap::new(),
             },
         };
         
