@@ -506,6 +506,23 @@ impl PluginRegistry {
             })?;
             ctx.globals().set("set_account_id", set_account_id_fn)?;
 
+            // Add btoa (base64 encode) function
+            let btoa_fn = Function::new(ctx.clone(), |input: String| -> String {
+                use base64::{Engine as _, engine::general_purpose};
+                general_purpose::STANDARD.encode(input.as_bytes())
+            })?;
+            ctx.globals().set("btoa", btoa_fn)?;
+
+            // Add atob (base64 decode) function
+            let atob_fn = Function::new(ctx.clone(), |input: String| -> String {
+                use base64::{Engine as _, engine::general_purpose};
+                match general_purpose::STANDARD.decode(input.as_bytes()) {
+                    Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                    Err(_) => String::new()
+                }
+            })?;
+            ctx.globals().set("atob", atob_fn)?;
+
             Ok::<(), anyhow::Error>(())
         })?;
 
