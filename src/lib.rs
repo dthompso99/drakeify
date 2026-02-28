@@ -450,6 +450,12 @@ pub async fn execute_conversation_loop(
         // Get tools from registry
         let combined_tools = tool_registry.get_llm_tools();
 
+        // Debug: Log tools being sent to LLM
+        eprintln!("[execute_conversation_loop] Sending {} tools to LLM", combined_tools.len());
+        for tool in &combined_tools {
+            eprintln!("  - {}: {}", tool.function.name, tool.function.description);
+        }
+
         // Build LLM request
         let mut current_request = OllamaRequest {
             model: llm_model.to_string(),

@@ -638,6 +638,15 @@ fn setup_http_fetch(ctx: &rquickjs::Ctx, _config: &JsRuntimeConfig) -> Result<()
             throw new Error('Session management not available in this context');
         };
 
+        globalThis.__rust_clear_session = function(sessionId) {
+            throw new Error('Session management not available in this context');
+        };
+
+        // Placeholder for get_current_session_id - will be replaced by Rust
+        globalThis.get_current_session_id = function() {
+            return '';
+        };
+
         // Session getter function
         globalThis.get_session = function(sessionId) {
             try {
@@ -668,6 +677,23 @@ fn setup_http_fetch(ctx: &rquickjs::Ctx, _config: &JsRuntimeConfig) -> Result<()
                 }
             } catch (e) {
                 throw new Error('Failed to set session: ' + String(e));
+            }
+        };
+
+        // Session clear function
+        globalThis.clear_session = function(sessionId) {
+            try {
+                var resultJson = __rust_clear_session(sessionId);
+                var result = JSON.parse(resultJson);
+
+                // Check for error
+                if (result.__error) {
+                    throw new Error(result.__error);
+                }
+
+                return result.deleted;
+            } catch (e) {
+                throw new Error('Failed to clear session: ' + String(e));
             }
         };
 

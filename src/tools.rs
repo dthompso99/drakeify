@@ -54,6 +54,7 @@ pub struct ToolRegistry {
     disabled_tools: Option<Vec<String>>,
     database: Option<std::sync::Arc<Database>>,
     account_id: String,
+    session_id: Option<String>,
 }
 
 impl ToolRegistry {
@@ -73,7 +74,13 @@ impl ToolRegistry {
             disabled_tools,
             database,
             account_id: account_id.unwrap_or_else(|| "anonymous".to_string()),
+            session_id: None,
         })
+    }
+
+    /// Set the current session ID for this tool registry
+    pub fn set_session_id(&mut self, session_id: Option<String>) {
+        self.session_id = session_id;
     }
 
     /// Check if a tool should be loaded based on enabled/disabled lists
@@ -470,6 +477,13 @@ impl ToolRegistry {
             })?;
             ctx.globals().set("get_account_id", get_account_id_fn)?;
 
+            // Inject get_current_session_id function (read-only for tools)
+            let session_id_clone = self.session_id.clone();
+            let get_current_session_id_fn = Function::new(ctx.clone(), move || -> String {
+                session_id_clone.clone().unwrap_or_else(|| "".to_string())
+            })?;
+            ctx.globals().set("get_current_session_id", get_current_session_id_fn)?;
+
             // Add btoa (base64 encode) function
             let btoa_fn = Function::new(ctx.clone(), |input: String| -> String {
                 use base64::{Engine as _, engine::general_purpose};
@@ -489,6 +503,134 @@ impl ToolRegistry {
 
             Ok::<(), anyhow::Error>(())
         })?;
+
+        // Inject session functions if database is available
+        if let Some(ref db) = self.database {
+            ctx.with(|ctx| {
+                let database_clone = db.clone();
+                let account_id_clone = self.account_id.clone();
+
+                // get_session(session_id) -> object
+                let get_session_fn = Function::new(ctx.clone(), move |session_id: String| -> String {
+                    let db_clone = database_clone.clone();
+                    let account_id = account_id_clone.clone();
+
+                    if let Some(h) = tokio::runtime::Handle::try_current().ok() {
+                        tokio::task::block_in_place(|| {
+                            h.block_on(async move {
+                                match db_clone.get_session(&session_id, &account_id).await {
+                                    Ok(Some((messages, metadata))) => {
+                                        serde_json::json!({
+                                            "messages": serde_json::from_str::<serde_json::Value>(&messages).unwrap_or(serde_json::json!([])),
+                                            "metadata": serde_json::from_str::<serde_json::Value>(&metadata).unwrap_or(serde_json::json!({}))
+                                        }).to_string()
+                                    }
+                                    Ok(None) => {
+                                        serde_json::json!({}).to_string()
+                                    }
+                                    Err(e) => {
+                                        serde_json::json!({
+                                            "__error": format!("Failed to get session: {}", e)
+                                        }).to_string()
+                                    }
+                                }
+                            })
+                        })
+                    } else {
+                        serde_json::json!({
+                            "__error": "No tokio runtime available"
+                        }).to_string()
+                    }
+                })?;
+                ctx.globals().set("__rust_get_session", get_session_fn)?;
+
+                let database_clone2 = db.clone();
+                let account_id_clone2 = self.account_id.clone();
+
+                // set_session(session_id, session_data) -> void
+                let set_session_fn = Function::new(ctx.clone(), move |session_id: String, session_data_json: String| -> String {
+                    let db_clone = database_clone2.clone();
+                    let account_id = account_id_clone2.clone();
+
+                    if let Some(h) = tokio::runtime::Handle::try_current().ok() {
+                        tokio::task::block_in_place(|| {
+                            h.block_on(async move {
+                                // Parse session data
+                                let session_data: serde_json::Value = match serde_json::from_str(&session_data_json) {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        return serde_json::json!({
+                                            "__error": format!("Failed to parse session data: {}", e)
+                                        }).to_string();
+                                    }
+                                };
+
+                                // Extract messages and metadata
+                                let messages = session_data.get("messages")
+                                    .cloned()
+                                    .unwrap_or(serde_json::json!([]));
+
+                                let metadata = session_data.get("metadata")
+                                    .cloned()
+                                    .unwrap_or(serde_json::json!({}));
+
+                                // Serialize to strings for database
+                                let messages_str = messages.to_string();
+                                let metadata_str = metadata.to_string();
+
+                                match db_clone.upsert_session(&session_id, &account_id, &messages_str, &metadata_str).await {
+                                    Ok(_) => serde_json::json!({ "success": true }).to_string(),
+                                    Err(e) => {
+                                        serde_json::json!({
+                                            "__error": format!("Failed to save session: {}", e)
+                                        }).to_string()
+                                    }
+                                }
+                            })
+                        })
+                    } else {
+                        serde_json::json!({
+                            "__error": "No tokio runtime available"
+                        }).to_string()
+                    }
+                })?;
+                ctx.globals().set("__rust_set_session", set_session_fn)?;
+
+                let database_clone3 = db.clone();
+                let account_id_clone3 = self.account_id.clone();
+
+                // clear_session(session_id) -> bool
+                let clear_session_fn = Function::new(ctx.clone(), move |session_id: String| -> String {
+                    let db_clone = database_clone3.clone();
+                    let account_id = account_id_clone3.clone();
+
+                    if let Some(h) = tokio::runtime::Handle::try_current().ok() {
+                        tokio::task::block_in_place(|| {
+                            h.block_on(async move {
+                                match db_clone.delete_session(&session_id, &account_id).await {
+                                    Ok(deleted) => serde_json::json!({
+                                        "success": true,
+                                        "deleted": deleted
+                                    }).to_string(),
+                                    Err(e) => {
+                                        serde_json::json!({
+                                            "__error": format!("Failed to clear session: {}", e)
+                                        }).to_string()
+                                    }
+                                }
+                            })
+                        })
+                    } else {
+                        serde_json::json!({
+                            "__error": "No tokio runtime available"
+                        }).to_string()
+                    }
+                })?;
+                ctx.globals().set("__rust_clear_session", clear_session_fn)?;
+
+                Ok::<(), anyhow::Error>(())
+            })?;
+        }
 
         ctx.with(|ctx| {
             // Evaluate the tool code to get the tool object
