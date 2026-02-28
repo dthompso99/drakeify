@@ -224,18 +224,18 @@ pub async fn execute_request(
     }
 
     // Debug: Dump request to file for debugging
-    if let Ok(request_json) = serde_json::to_string_pretty(&request) {
-        use std::io::Write;
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
-        let filename = format!("/data/llm_request_{}.json", timestamp);
-        if let Ok(mut file) = std::fs::File::create(&filename) {
-            let _ = writeln!(file, "{}", request_json);
-            eprintln!("[DEBUG] LLM request dumped to: {}", filename);
-        }
-    }
+    // if let Ok(request_json) = serde_json::to_string_pretty(&request) {
+    //     use std::io::Write;
+    //     let timestamp = std::time::SystemTime::now()
+    //         .duration_since(std::time::UNIX_EPOCH)
+    //         .unwrap()
+    //         .as_millis();
+    //     let filename = format!("/data/llm_request_{}.json", timestamp);
+    //     if let Ok(mut file) = std::fs::File::create(&filename) {
+    //         let _ = writeln!(file, "{}", request_json);
+    //         eprintln!("[DEBUG] LLM request dumped to: {}", filename);
+    //     }
+    // }
 
     let response = client.post(url).json(&request).send().await?;
     let byte_stream = response.bytes_stream().map(|result| {
