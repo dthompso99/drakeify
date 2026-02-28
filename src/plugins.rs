@@ -811,7 +811,7 @@ impl PluginRegistry {
                                 };
 
                                 // Create tool registry
-                                let tool_registry = match crate::tools::ToolRegistry::new(
+                                let mut tool_registry = match crate::tools::ToolRegistry::new(
                                     js_config.clone(),
                                     None, // enabled_tools - use all tools
                                     None, // disabled_tools
@@ -825,6 +825,13 @@ impl PluginRegistry {
                                         }).to_string();
                                     }
                                 };
+
+                                // Load tools from directory
+                                if let Err(e) = tool_registry.load_tools_from_dir("data/tools") {
+                                    return serde_json::json!({
+                                        "__error": format!("Failed to load tools: {}", e)
+                                    }).to_string();
+                                }
 
                                 // Create plugin registry
                                 let mut plugin_registry = match crate::plugins::PluginRegistry::new(
