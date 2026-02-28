@@ -282,11 +282,15 @@ impl PluginRegistry {
                     // Interpolate secrets if database is available
                     if let Some(ref db) = database_clone {
                         if let Some(h) = tokio::runtime::Handle::try_current().ok() {
+                            let (tx, rx) = std::sync::mpsc::channel();
                             let db_clone = db.clone();
                             let url_clone = final_url.clone();
-                            final_url = h.block_on(async move {
-                                interpolate_secrets_sync(&url_clone, &db_clone).await
+                            h.spawn(async move {
+                                let result = interpolate_secrets_sync(&url_clone, &db_clone).await;
+                                let _ = tx.send(result);
                             });
+                            final_url = rx.recv_timeout(std::time::Duration::from_secs(10))
+                                .unwrap_or(final_url);
                         }
                     }
 
@@ -309,17 +313,27 @@ impl PluginRegistry {
                     // Interpolate secrets if database is available
                     if let Some(ref db) = database_clone2 {
                         if let Some(h) = tokio::runtime::Handle::try_current().ok() {
+                            // Interpolate URL
+                            let (tx, rx) = std::sync::mpsc::channel();
                             let db_clone = db.clone();
                             let url_clone = final_url.clone();
-                            final_url = h.block_on(async move {
-                                interpolate_secrets_sync(&url_clone, &db_clone).await
+                            h.spawn(async move {
+                                let result = interpolate_secrets_sync(&url_clone, &db_clone).await;
+                                let _ = tx.send(result);
                             });
+                            final_url = rx.recv_timeout(std::time::Duration::from_secs(10))
+                                .unwrap_or(final_url);
 
+                            // Interpolate body
+                            let (tx, rx) = std::sync::mpsc::channel();
                             let db_clone2 = db.clone();
                             let body_clone = final_body.clone();
-                            final_body = h.block_on(async move {
-                                interpolate_secrets_sync(&body_clone, &db_clone2).await
+                            h.spawn(async move {
+                                let result = interpolate_secrets_sync(&body_clone, &db_clone2).await;
+                                let _ = tx.send(result);
                             });
+                            final_body = rx.recv_timeout(std::time::Duration::from_secs(10))
+                                .unwrap_or(final_body);
                         }
                     }
 
@@ -370,34 +384,44 @@ impl PluginRegistry {
 
                     // Interpolate secrets if database is available
                     if let Some(ref db) = database_clone {
-                        // Use blocking call to interpolate secrets
-                        let handle = tokio::runtime::Handle::try_current().ok();
-                        if let Some(h) = handle {
+                        if let Some(h) = tokio::runtime::Handle::try_current().ok() {
+                            // Interpolate URL
+                            let (tx, rx) = std::sync::mpsc::channel();
                             let db_clone = db.clone();
                             let url_clone = url.clone();
-                            url = h.block_on(async move {
-                                interpolate_secrets_sync(&url_clone, &db_clone).await
+                            h.spawn(async move {
+                                let result = interpolate_secrets_sync(&url_clone, &db_clone).await;
+                                let _ = tx.send(result);
                             });
+                            url = rx.recv_timeout(std::time::Duration::from_secs(10))
+                                .unwrap_or(url);
 
                             // Interpolate in headers
+                            let (tx, rx) = std::sync::mpsc::channel();
                             let headers_clone = headers.clone();
                             let db_clone2 = db.clone();
-                            headers = h.block_on(async move {
+                            h.spawn(async move {
                                 let mut result = HashMap::new();
                                 for (k, v) in headers_clone {
                                     let interpolated = interpolate_secrets_sync(&v, &db_clone2).await;
                                     result.insert(k, interpolated);
                                 }
-                                result
+                                let _ = tx.send(result);
                             });
+                            headers = rx.recv_timeout(std::time::Duration::from_secs(10))
+                                .unwrap_or(headers);
 
                             // Interpolate in body
                             if let Some(ref b) = body {
+                                let (tx, rx) = std::sync::mpsc::channel();
                                 let body_clone = b.clone();
                                 let db_clone3 = db.clone();
-                                body = Some(h.block_on(async move {
-                                    interpolate_secrets_sync(&body_clone, &db_clone3).await
-                                }));
+                                h.spawn(async move {
+                                    let result = interpolate_secrets_sync(&body_clone, &db_clone3).await;
+                                    let _ = tx.send(result);
+                                });
+                                body = rx.recv_timeout(std::time::Duration::from_secs(10))
+                                    .ok();
                             }
                         }
                     }
@@ -669,80 +693,82 @@ impl PluginRegistry {
 
                 // call_llm(options) -> object
                 let call_llm_fn = Function::new(ctx.clone(), move |options_json: String| -> String {
-                    if let Some(h) = tokio::runtime::Handle::try_current().ok() {
-                        let config = llm_config_clone.clone();
-                        let default_model = llm_model_clone.clone();
+                    tokio::task::block_in_place(|| {
+                        if let Some(h) = tokio::runtime::Handle::try_current().ok() {
+                            let config = llm_config_clone.clone();
+                            let default_model = llm_model_clone.clone();
 
-                        h.block_on(async move {
-                            // Parse options
-                            let options: serde_json::Value = match serde_json::from_str(&options_json) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    return serde_json::json!({
-                                        "__error": format!("Failed to parse options: {}", e)
-                                    }).to_string();
+                            h.block_on(async {
+                                // Parse options
+                                let options: serde_json::Value = match serde_json::from_str(&options_json) {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        return serde_json::json!({
+                                            "__error": format!("Failed to parse options: {}", e)
+                                        }).to_string();
+                                    }
+                                };
+
+                                // Extract messages
+                                let messages_value = match options.get("messages") {
+                                    Some(v) => v.clone(),
+                                    None => {
+                                        return serde_json::json!({
+                                            "__error": "Missing required field: messages"
+                                        }).to_string();
+                                    }
+                                };
+
+                                let messages: Vec<OllamaMessage> = match serde_json::from_value(messages_value) {
+                                    Ok(m) => m,
+                                    Err(e) => {
+                                        return serde_json::json!({
+                                            "__error": format!("Failed to parse messages: {}", e)
+                                        }).to_string();
+                                    }
+                                };
+
+                                // Extract optional model (default to config model)
+                                let model = options.get("model")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&default_model)
+                                    .to_string();
+
+                                // Build LLM request
+                                let request = OllamaRequest {
+                                    model,
+                                    prompt: None,
+                                    stream: false,
+                                    think: false,
+                                    options: OllamaOptions {
+                                        num_ctx: 8192, // Default context size
+                                    },
+                                    messages,
+                                    tools: vec![], // No tool support for now
+                                    tool_choice: None,
+                                };
+
+                                // Execute LLM request
+                                match crate::llm::execute_request(request, &config, true, None).await {
+                                    Ok(response) => {
+                                        serde_json::json!({
+                                            "content": response.content,
+                                            "tool_calls": response.tool_calls
+                                        }).to_string()
+                                    }
+                                    Err(e) => {
+                                        serde_json::json!({
+                                            "__error": format!("LLM request failed: {}", e)
+                                        }).to_string()
+                                    }
                                 }
-                            };
-
-                            // Extract messages
-                            let messages_value = match options.get("messages") {
-                                Some(v) => v.clone(),
-                                None => {
-                                    return serde_json::json!({
-                                        "__error": "Missing required field: messages"
-                                    }).to_string();
-                                }
-                            };
-
-                            let messages: Vec<OllamaMessage> = match serde_json::from_value(messages_value) {
-                                Ok(m) => m,
-                                Err(e) => {
-                                    return serde_json::json!({
-                                        "__error": format!("Failed to parse messages: {}", e)
-                                    }).to_string();
-                                }
-                            };
-
-                            // Extract optional model (default to config model)
-                            let model = options.get("model")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or(&default_model)
-                                .to_string();
-
-                            // Build LLM request
-                            let request = OllamaRequest {
-                                model,
-                                prompt: None,
-                                stream: false,
-                                think: false,
-                                options: OllamaOptions {
-                                    num_ctx: 8192, // Default context size
-                                },
-                                messages,
-                                tools: vec![], // No tool support for now
-                                tool_choice: None,
-                            };
-
-                            // Execute LLM request
-                            match crate::llm::execute_request(request, &config, true, None).await {
-                                Ok(response) => {
-                                    serde_json::json!({
-                                        "content": response.content,
-                                        "tool_calls": response.tool_calls
-                                    }).to_string()
-                                }
-                                Err(e) => {
-                                    serde_json::json!({
-                                        "__error": format!("LLM request failed: {}", e)
-                                    }).to_string()
-                                }
-                            }
-                        })
-                    } else {
-                        serde_json::json!({
-                            "__error": "No tokio runtime available"
-                        }).to_string()
-                    }
+                            })
+                        } else {
+                            serde_json::json!({
+                                "__error": "No tokio runtime available"
+                            }).to_string()
+                        }
+                    })
                 })?;
                 ctx.globals().set("__rust_call_llm", call_llm_fn)?;
 
@@ -763,93 +789,95 @@ impl PluginRegistry {
 
                 // process_conversation(messages) -> object
                 let process_conversation_fn = Function::new(ctx.clone(), move |messages_json: String| -> String {
-                    if let Some(h) = tokio::runtime::Handle::try_current().ok() {
-                        let config = llm_config_clone.clone();
-                        let model = llm_model_clone.clone();
-                        let js_config = js_config_clone.clone();
-                        let enabled_plugins = enabled_plugins_clone.clone();
-                        let disabled_plugins = disabled_plugins_clone.clone();
-                        let database = database_clone.clone();
-                        let account_id = account_id_rc.borrow().clone(); // Read current value at call time
+                    tokio::task::block_in_place(|| {
+                        if let Some(h) = tokio::runtime::Handle::try_current().ok() {
+                            let config = llm_config_clone.clone();
+                            let model = llm_model_clone.clone();
+                            let js_config = js_config_clone.clone();
+                            let enabled_plugins = enabled_plugins_clone.clone();
+                            let disabled_plugins = disabled_plugins_clone.clone();
+                            let database = database_clone.clone();
+                            let account_id = account_id_rc.borrow().clone(); // Read current value at call time
 
-                        h.block_on(async move {
-                            // Parse messages
-                            let messages: Vec<OllamaMessage> = match serde_json::from_str(&messages_json) {
-                                Ok(m) => m,
-                                Err(e) => {
+                            h.block_on(async {
+                                // Parse messages
+                                let messages: Vec<OllamaMessage> = match serde_json::from_str(&messages_json) {
+                                    Ok(m) => m,
+                                    Err(e) => {
+                                        return serde_json::json!({
+                                            "__error": format!("Failed to parse messages: {}", e)
+                                        }).to_string();
+                                    }
+                                };
+
+                                // Create tool registry
+                                let tool_registry = match crate::tools::ToolRegistry::new(
+                                    js_config.clone(),
+                                    None, // enabled_tools - use all tools
+                                    None, // disabled_tools
+                                    database.clone(),
+                                    Some(account_id.clone())
+                                ) {
+                                    Ok(r) => r,
+                                    Err(e) => {
+                                        return serde_json::json!({
+                                            "__error": format!("Failed to create tool registry: {}", e)
+                                        }).to_string();
+                                    }
+                                };
+
+                                // Create plugin registry
+                                let mut plugin_registry = match crate::plugins::PluginRegistry::new(
+                                    js_config,
+                                    enabled_plugins,
+                                    disabled_plugins,
+                                    database,
+                                    Some(account_id),
+                                    Some(config.clone()),
+                                    Some(model.clone())
+                                ) {
+                                    Ok(r) => r,
+                                    Err(e) => {
+                                        return serde_json::json!({
+                                            "__error": format!("Failed to create plugin registry: {}", e)
+                                        }).to_string();
+                                    }
+                                };
+
+                                // Load plugins from directory
+                                if let Err(e) = plugin_registry.load_plugins_from_dir("data/plugins") {
                                     return serde_json::json!({
-                                        "__error": format!("Failed to parse messages: {}", e)
+                                        "__error": format!("Failed to load plugins: {}", e)
                                     }).to_string();
                                 }
-                            };
 
-                            // Create tool registry
-                            let tool_registry = match crate::tools::ToolRegistry::new(
-                                js_config.clone(),
-                                None, // enabled_tools - use all tools
-                                None, // disabled_tools
-                                database.clone(),
-                                Some(account_id.clone())
-                            ) {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    return serde_json::json!({
-                                        "__error": format!("Failed to create tool registry: {}", e)
-                                    }).to_string();
+                                // Execute conversation loop
+                                match crate::execute_conversation_loop(
+                                    messages,
+                                    &config,
+                                    &model,
+                                    8192, // Default context size
+                                    &tool_registry,
+                                    &plugin_registry
+                                ).await {
+                                    Ok(response) => {
+                                        serde_json::json!({
+                                            "content": response
+                                        }).to_string()
+                                    }
+                                    Err(e) => {
+                                        serde_json::json!({
+                                            "__error": format!("Conversation loop failed: {}", e)
+                                        }).to_string()
+                                    }
                                 }
-                            };
-
-                            // Create plugin registry
-                            let mut plugin_registry = match crate::plugins::PluginRegistry::new(
-                                js_config,
-                                enabled_plugins,
-                                disabled_plugins,
-                                database,
-                                Some(account_id),
-                                Some(config.clone()),
-                                Some(model.clone())
-                            ) {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    return serde_json::json!({
-                                        "__error": format!("Failed to create plugin registry: {}", e)
-                                    }).to_string();
-                                }
-                            };
-
-                            // Load plugins from directory
-                            if let Err(e) = plugin_registry.load_plugins_from_dir("data/plugins") {
-                                return serde_json::json!({
-                                    "__error": format!("Failed to load plugins: {}", e)
-                                }).to_string();
-                            }
-
-                            // Execute conversation loop
-                            match crate::execute_conversation_loop(
-                                messages,
-                                &config,
-                                &model,
-                                8192, // Default context size
-                                &tool_registry,
-                                &plugin_registry
-                            ).await {
-                                Ok(response) => {
-                                    serde_json::json!({
-                                        "content": response
-                                    }).to_string()
-                                }
-                                Err(e) => {
-                                    serde_json::json!({
-                                        "__error": format!("Conversation loop failed: {}", e)
-                                    }).to_string()
-                                }
-                            }
-                        })
-                    } else {
-                        serde_json::json!({
-                            "__error": "No tokio runtime available"
-                        }).to_string()
-                    }
+                            })
+                        } else {
+                            serde_json::json!({
+                                "__error": "No tokio runtime available"
+                            }).to_string()
+                        }
+                    })
                 })?;
                 ctx.globals().set("__rust_process_conversation", process_conversation_fn)?;
 
