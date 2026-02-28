@@ -538,10 +538,34 @@ impl PluginRegistry {
             })?;
             ctx.globals().set("set_account_id", set_account_id_fn)?;
 
-            // Add btoa (base64 encode) function
-            let btoa_fn = Function::new(ctx.clone(), |input: String| -> String {
+            // Add btoa (base64 encode) function with secret interpolation
+            let database_clone_btoa = self.database.clone();
+            let btoa_fn = Function::new(ctx.clone(), move |input: String| -> String {
                 use base64::{Engine as _, engine::general_purpose};
-                general_purpose::STANDARD.encode(input.as_bytes())
+
+                // Interpolate secrets before encoding
+                let final_input = if let Some(ref db) = database_clone_btoa {
+                    if let Some(h) = tokio::runtime::Handle::try_current().ok() {
+                        let db_clone = db.clone();
+                        let input_clone = input.clone();
+                        eprintln!("[DEBUG] [btoa] BEFORE secret interpolation: {}", input_clone);
+                        let interpolated = tokio::task::block_in_place(|| {
+                            h.block_on(async move {
+                                interpolate_secrets_sync(&input_clone, &db_clone).await
+                            })
+                        });
+                        eprintln!("[DEBUG] [btoa] AFTER secret interpolation: {}", interpolated);
+                        interpolated
+                    } else {
+                        input
+                    }
+                } else {
+                    input
+                };
+
+                let encoded = general_purpose::STANDARD.encode(final_input.as_bytes());
+                eprintln!("[DEBUG] [btoa] Final base64 encoded: {}", encoded);
+                encoded
             })?;
             ctx.globals().set("btoa", btoa_fn)?;
 
