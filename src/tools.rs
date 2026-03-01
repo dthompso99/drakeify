@@ -511,10 +511,29 @@ impl ToolRegistry {
             })?;
             ctx.globals().set("get_current_session_id", get_current_session_id_fn)?;
 
-            // Add btoa (base64 encode) function
-            let btoa_fn = Function::new(ctx.clone(), |input: String| -> String {
+            // Add btoa (base64 encode) function with secret interpolation
+            let database_clone_btoa = self.database.clone();
+            let btoa_fn = Function::new(ctx.clone(), move |input: String| -> String {
                 use base64::{Engine as _, engine::general_purpose};
-                general_purpose::STANDARD.encode(input.as_bytes())
+
+                // Interpolate secrets before encoding
+                let final_input = if let Some(ref db) = database_clone_btoa {
+                    if let Some(h) = tokio::runtime::Handle::try_current().ok() {
+                        let db_clone = db.clone();
+                        let input_clone = input.clone();
+                        tokio::task::block_in_place(|| {
+                            h.block_on(async move {
+                                interpolate_secrets_sync(&input_clone, &db_clone).await
+                            })
+                        })
+                    } else {
+                        input
+                    }
+                } else {
+                    input
+                };
+
+                general_purpose::STANDARD.encode(final_input.as_bytes())
             })?;
             ctx.globals().set("btoa", btoa_fn)?;
 
@@ -794,6 +813,124 @@ impl SchemaBuilder {
             properties: Some(self.properties),
             required: Some(self.required),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_multi_tool_bundle_registration() {
+        // Create a simple multi-tool bundle
+        let js_code = r#"
+            function register() {
+                return [
+                    {
+                        name: "test_tool_1",
+                        description: "First test tool",
+                        parameters: {
+                            type: "object",
+                            properties: {
+                                input: { type: "string", description: "Input" }
+                            },
+                            required: ["input"]
+                        }
+                    },
+                    {
+                        name: "test_tool_2",
+                        description: "Second test tool",
+                        parameters: {
+                            type: "object",
+                            properties: {
+                                value: { type: "number", description: "Value" }
+                            },
+                            required: ["value"]
+                        }
+                    }
+                ];
+            }
+
+            function execute(args) {
+                const toolName = args && args._tool_name;
+                if (toolName === "test_tool_1") {
+                    return JSON.stringify({ success: true, tool: "test_tool_1", input: args.input });
+                }
+                if (toolName === "test_tool_2") {
+                    return JSON.stringify({ success: true, tool: "test_tool_2", value: args.value });
+                }
+                return JSON.stringify({ success: false, error: "Unknown tool" });
+            }
+
+            ({ register, execute })
+        "#;
+
+        // Create a tool registry
+        let config = JsRuntimeConfig::default();
+        let mut registry = ToolRegistry::new(config, None, None, None, None).unwrap();
+
+        // Register the multi-tool bundle
+        registry.register_tool_from_js(js_code).unwrap();
+
+        // Verify both tools were registered
+        assert!(registry.has_tool("test_tool_1"), "test_tool_1 should be registered");
+        assert!(registry.has_tool("test_tool_2"), "test_tool_2 should be registered");
+
+        // Test executing test_tool_1
+        let args1 = serde_json::json!({ "input": "hello" });
+        let result1 = registry.execute("test_tool_1", args1).unwrap();
+        assert_eq!(result1["success"], true);
+        assert_eq!(result1["tool"], "test_tool_1");
+        assert_eq!(result1["input"], "hello");
+
+        // Test executing test_tool_2
+        let args2 = serde_json::json!({ "value": 42 });
+        let result2 = registry.execute("test_tool_2", args2).unwrap();
+        assert_eq!(result2["success"], true);
+        assert_eq!(result2["tool"], "test_tool_2");
+        assert_eq!(result2["value"], 42);
+    }
+
+    #[test]
+    fn test_single_tool_registration() {
+        // Create a simple single tool
+        let js_code = r#"
+            function register() {
+                return {
+                    name: "single_test_tool",
+                    description: "A single test tool",
+                    parameters: {
+                        type: "object",
+                        properties: {
+                            message: { type: "string", description: "Message" }
+                        },
+                        required: ["message"]
+                    }
+                };
+            }
+
+            function execute(args) {
+                return JSON.stringify({ success: true, message: args.message });
+            }
+
+            ({ register, execute })
+        "#;
+
+        // Create a tool registry
+        let config = JsRuntimeConfig::default();
+        let mut registry = ToolRegistry::new(config, None, None, None, None).unwrap();
+
+        // Register the single tool
+        registry.register_tool_from_js(js_code).unwrap();
+
+        // Verify the tool was registered
+        assert!(registry.has_tool("single_test_tool"), "single_test_tool should be registered");
+
+        // Test executing the tool
+        let args = serde_json::json!({ "message": "test message" });
+        let result = registry.execute("single_test_tool", args).unwrap();
+        assert_eq!(result["success"], true);
+        assert_eq!(result["message"], "test message");
     }
 }
 
