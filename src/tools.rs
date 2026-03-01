@@ -136,6 +136,7 @@ impl ToolRegistry {
     }
 
     /// Register a tool by calling its register() function
+    /// Supports both single tool registration and multi-tool bundles (arrays)
     fn register_tool_from_js(&mut self, js_code: &str) -> Result<()> {
         let ctx = JsContext::full(&self.js_runtime)?;
 
@@ -145,33 +146,58 @@ impl ToolRegistry {
 
             // Call the register() function
             let register_fn: rquickjs::Function = tool_obj.get("register")?;
-            let metadata: Object = register_fn.call(())?;
+            let result: JsValue = register_fn.call(())?;
 
-            // Extract metadata
-            let name: String = metadata.get("name")?;
+            // Check if result is an array (multi-tool bundle) or object (single tool)
+            if result.is_array() {
+                // Multi-tool bundle: iterate over array and register each tool
+                // Convert to Object to access array properties
+                let array_obj: Object = result.into_object().context("Failed to convert array to object")?;
+                let array_len: usize = array_obj.get("length")?;
 
-            // Check if this tool should be loaded
-            if !self.should_load_tool(&name) {
-                return Ok(());
+                for i in 0..array_len {
+                    // Convert index to u32 which implements IntoAtom
+                    let metadata: Object = array_obj.get(i as u32)?;
+                    self.register_single_tool_from_metadata(&ctx, metadata, js_code)?;
+                }
+            } else if result.is_object() {
+                // Single tool: register it directly
+                let metadata: Object = result.into_object().context("Expected object from register()")?;
+                self.register_single_tool_from_metadata(&ctx, metadata, js_code)?;
+            } else {
+                anyhow::bail!("register() must return an object or array of objects");
             }
 
-            let description: String = metadata.get("description")?;
-            let params_obj: Object = metadata.get("parameters")?;
-
-            // Convert parameters to JsonSchema
-            let schema = self.parse_schema_from_js(&ctx, params_obj)?;
-
-            // Create and register the tool
-            let tool = Tool {
-                name: name.clone(),
-                description,
-                schema,
-                js_code: js_code.to_string(),
-            };
-
-            self.tools.insert(name, tool);
             Ok(())
         })
+    }
+
+    /// Register a single tool from its metadata object
+    fn register_single_tool_from_metadata<'js>(&mut self, ctx: &rquickjs::Ctx<'js>, metadata: Object<'js>, js_code: &str) -> Result<()> {
+        // Extract metadata
+        let name: String = metadata.get("name")?;
+
+        // Check if this tool should be loaded
+        if !self.should_load_tool(&name) {
+            return Ok(());
+        }
+
+        let description: String = metadata.get("description")?;
+        let params_obj: Object = metadata.get("parameters")?;
+
+        // Convert parameters to JsonSchema
+        let schema = self.parse_schema_from_js(ctx, params_obj)?;
+
+        // Create and register the tool
+        let tool = Tool {
+            name: name.clone(),
+            description,
+            schema,
+            js_code: js_code.to_string(),
+        };
+
+        self.tools.insert(name, tool);
+        Ok(())
     }
 
     /// Parse a JSON schema from a JavaScript object
@@ -235,11 +261,12 @@ impl ToolRegistry {
         let tool = self.tools.get(tool_name)
             .context(format!("Tool '{}' not found", tool_name))?;
 
-        self.execute_js_tool(&tool.js_code, args)
+        self.execute_js_tool(&tool.js_code, tool_name, args)
     }
 
     /// Execute a JavaScript tool by calling its execute() function
-    fn execute_js_tool(&self, js_code: &str, args: Value) -> Result<Value> {
+    /// Injects _tool_name into args to support multi-tool bundles
+    fn execute_js_tool(&self, js_code: &str, tool_name: &str, args: Value) -> Result<Value> {
         let ctx = JsContext::full(&self.js_runtime)?;
 
         // Setup globals for this execution context
@@ -639,8 +666,19 @@ impl ToolRegistry {
             // Get the execute function
             let execute_fn: rquickjs::Function = tool_obj.get("execute")?;
 
+            // Inject _tool_name into args for multi-tool bundle support
+            let mut args_with_tool_name = args.clone();
+            if let Some(obj) = args_with_tool_name.as_object_mut() {
+                obj.insert("_tool_name".to_string(), Value::String(tool_name.to_string()));
+            } else {
+                // If args is not an object, create one with _tool_name
+                let mut new_obj = serde_json::Map::new();
+                new_obj.insert("_tool_name".to_string(), Value::String(tool_name.to_string()));
+                args_with_tool_name = Value::Object(new_obj);
+            }
+
             // Convert args to JS object
-            let args_str = serde_json::to_string(&args)?;
+            let args_str = serde_json::to_string(&args_with_tool_name)?;
             let args_js: JsValue = ctx.json_parse(args_str)?;
 
             // Call execute(args)
