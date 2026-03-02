@@ -196,7 +196,7 @@ impl PluginRegistry {
             let hooks_obj: rquickjs::Object = obj.get("hooks")?;
             let mut hooks = HashSet::new();
             
-            for hook_name in ["pre_request", "post_response", "on_stream_chunk",
+            for hook_name in ["pre_request", "on_llm_response", "post_response", "on_stream_chunk",
                                "on_conversation_turn", "on_tool_call", "on_tool_result", "on_webhook_call"] {
                 if hooks_obj.get::<_, Option<bool>>(hook_name)?.unwrap_or(false) {
                     hooks.insert(hook_name.to_string());

@@ -339,10 +339,20 @@ pub async fn run_conversation(
             Some(&stream_callback)
         ).await?;
 
-        // Execute post_response plugin hook
-        let response_data = serde_json::json!({
+        // Execute on_llm_response plugin hook (runs immediately after LLM response, before tool execution)
+        let llm_response_data = serde_json::json!({
             "content": llm_response.content,
             "tool_calls": llm_response.tool_calls,
+        });
+        let modified_llm_response = plugin_registry.execute_hook("on_llm_response", llm_response_data)?;
+
+        // Execute post_response plugin hook (for backwards compatibility)
+        let response_data = serde_json::json!({
+            "content": modified_llm_response.get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&llm_response.content),
+            "tool_calls": modified_llm_response.get("tool_calls")
+                .unwrap_or(&serde_json::json!(llm_response.tool_calls)),
         });
         let modified_response = plugin_registry.execute_hook("post_response", response_data)?;
 
@@ -496,9 +506,32 @@ pub async fn execute_conversation_loop(
             None, // no stream callback
         ).await?;
 
-        // Extract content and tool calls from response
-        let final_content = llm_response.content;
-        let final_tool_calls = llm_response.tool_calls;
+        // Execute on_llm_response plugin hook (runs immediately after LLM response, before tool execution)
+        let llm_response_data = serde_json::json!({
+            "content": llm_response.content,
+            "tool_calls": llm_response.tool_calls,
+        });
+
+        let modified_llm_response = if let Ok(modified) = plugin_registry.execute_hook("on_llm_response", llm_response_data) {
+            modified
+        } else {
+            serde_json::json!({
+                "content": llm_response.content,
+                "tool_calls": llm_response.tool_calls,
+            })
+        };
+
+        // Extract content and tool calls from modified response
+        let final_content = modified_llm_response.get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&llm_response.content)
+            .to_string();
+
+        let final_tool_calls: Vec<llm::OllamaToolCall> = if let Some(tc) = modified_llm_response.get("tool_calls") {
+            serde_json::from_value(tc.clone()).unwrap_or(llm_response.tool_calls.clone())
+        } else {
+            llm_response.tool_calls.clone()
+        };
 
         // Store the assistant's response
         assistant_response = final_content.clone();
