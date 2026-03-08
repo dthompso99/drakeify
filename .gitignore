@@ -6,6 +6,7 @@ Cargo.lock
 /sessions
 *.log
 drakeify.toml
+internal/
 
 # Installed packages (subdirectories in data/tools and data/plugins)
 /data/tools/*/
