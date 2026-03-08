@@ -18,6 +18,7 @@ use tokio_stream::StreamExt;
 use crate::llm::{OllamaMessage, OllamaRequest, OllamaOptions, OllamaFunction, OllamaToolCall, OllamaFunctionCall, LlmConfig};
 use crate::js_runtime::JsRuntimeConfig;
 use crate::database::Database;
+use crate::StreamMessage;
 
 /// Extract account_id from Authorization header
 /// Format: "Authorization: Bearer <api_key>"
@@ -478,7 +479,7 @@ enum ToolLoopResult {
 }
 
 /// Convert a serde_json::Value to JsonSchema (similar to ToolRegistry::value_to_schema)
-fn value_to_schema(value: &Value) -> crate::llm::JsonSchema {
+pub fn value_to_schema(value: &Value) -> crate::llm::JsonSchema {
     use std::collections::BTreeMap;
 
     let obj = value.as_object();
@@ -520,45 +521,10 @@ fn value_to_schema(value: &Value) -> crate::llm::JsonSchema {
     }
 }
 
-/// Convert OpenAI tool definitions to Ollama format
-fn convert_client_tools_to_ollama(client_tools: &[ToolDefinition]) -> Vec<OllamaFunction> {
-    use crate::llm::OllamaFunctionDefinition;
 
-    client_tools.iter().map(|tool| {
-        let parameters = value_to_schema(&tool.function.parameters);
-
-        OllamaFunction {
-            r#type: "function".to_string(),
-            function: OllamaFunctionDefinition {
-                name: tool.function.name.clone(),
-                description: tool.function.description.clone(),
-                parameters,
-                required: vec![], // Client tools should specify their own required fields in parameters
-            },
-        }
-    }).collect()
-}
-
-/// Message types for streaming updates
-#[derive(Debug, Clone)]
-enum StreamMessage {
-    /// Content chunk from LLM
-    Content(String),
-    /// Thinking/status update
-    Thinking(String),
-    /// Tool call being executed
-    ToolCall(String, String), // tool_name, args
-    /// Tool result
-    ToolResult(String, String), // tool_name, result
-    /// Error occurred
-    Error(String),
-    /// Stream finished
-    Done,
-    /// Stream finished with tool calls
-    DoneWithToolCalls,
-}
 
 /// Execute the tool loop with streaming updates
+/// This is a thin wrapper around the unified conversation loop
 /// This is a synchronous function that runs in a blocking task
 fn execute_tool_loop_streaming(
     conversation_messages: &mut Vec<OllamaMessage>,
@@ -568,234 +534,34 @@ fn execute_tool_loop_streaming(
     client_tools: &[ToolDefinition],
     tx: &tokio::sync::mpsc::UnboundedSender<StreamMessage>,
 ) -> Result<ToolLoopResult> {
-    let mut assistant_response = String::new();
+    use crate::{ConversationLoopConfig, StreamingMode, execute_unified_conversation_loop};
 
-    let _ = tx.send(StreamMessage::Thinking("Processing request...".to_string()));
+    // Configure the unified loop for proxy mode
+    let loop_config = ConversationLoopConfig {
+        llm_config: &state.llm_config,
+        llm_model: state.llm_model.clone(),
+        context_size: state.context_size,
+        tool_registry,
+        plugin_registry,
+        client_tools: client_tools.to_vec(),
+        streaming: StreamingMode::Channel { tx: tx.clone() },
+    };
 
-    loop {
-        // Combine Agency tools + client tools
-        let mut combined_tools = tool_registry.get_llm_tools();
-        combined_tools.extend(convert_client_tools_to_ollama(client_tools));
+    // Execute the unified loop
+    // Use block_on since we're in a blocking task
+    let result = tokio::runtime::Handle::current().block_on(
+        execute_unified_conversation_loop(conversation_messages.clone(), loop_config)
+    )?;
 
-        // Build LLM request with current messages and combined tools
-        let mut current_request = OllamaRequest {
-            model: state.llm_model.clone(),
-            prompt: None,
-            stream: false,
-            think: false,
-            options: OllamaOptions {
-                num_ctx: state.context_size,
-            },
-            messages: conversation_messages.clone(),
-            tools: combined_tools,
-            tool_choice: Some("auto".to_string()),
-        };
+    // Update conversation_messages with the results from the unified loop
+    *conversation_messages = result.updated_messages;
 
-        // Execute pre_request plugin hook
-        let request_data = serde_json::json!({
-            "messages": current_request.messages,
-            "tools": current_request.tools,
-            "options": {
-                "num_ctx": current_request.options.num_ctx
-            }
-        });
-
-        if let Ok(modified_data) = plugin_registry.execute_hook("pre_request", request_data) {
-            // Update request with modified data
-            if let Some(messages) = modified_data.get("messages") {
-                if let Ok(updated_messages) = serde_json::from_value(messages.clone()) {
-                    current_request.messages = updated_messages;
-                }
-            }
-        }
-
-        debug!("Sending request to LLM with {} tools", current_request.tools.len());
-        let _ = tx.send(StreamMessage::Thinking("Waiting for LLM response...".to_string()));
-
-        // Execute LLM request (no streaming for now, no plugin hooks yet)
-        // Use block_on since we're in a blocking task
-        let llm_response = tokio::runtime::Handle::current().block_on(
-            crate::llm::execute_request(
-                current_request,
-                &state.llm_config,
-                true, // headless mode
-                None, // no stream callback for now
-            )
-        )?;
-
-        // Extract content and tool calls from response
-        let final_content = llm_response.content;
-        let final_tool_calls = llm_response.tool_calls;
-
-        debug!("LLM response: {} chars, {} tool calls", final_content.len(), final_tool_calls.len());
-
-        // Store the assistant's response
-        assistant_response = final_content.clone();
-
-        // If no tool calls, we're done
-        if final_tool_calls.is_empty() {
-            debug!("No tool calls, returning final response");
-
-            // Send the final content
-            let _ = tx.send(StreamMessage::Content(final_content.clone()));
-
-            // Add final assistant message to conversation (without tool_calls)
-            conversation_messages.push(OllamaMessage {
-                role: "assistant".to_string(),
-                content: final_content,
-                tool_calls: vec![],
-            });
-
-            break;
-        }
-
-        // Separate tool calls into Agency tools and client tools
-        let mut agency_tool_calls = vec![];
-        let mut client_tool_calls = vec![];
-
-        for tool_call in &final_tool_calls {
-            if tool_registry.has_tool(&tool_call.function.name) {
-                agency_tool_calls.push(tool_call.clone());
-            } else {
-                client_tool_calls.push(tool_call.clone());
-            }
-        }
-
-        debug!("Tool calls: {} Agency, {} client", agency_tool_calls.len(), client_tool_calls.len());
-
-        // Execute Agency tools transparently
-        if !agency_tool_calls.is_empty() {
-            // Add assistant message with Agency tool calls to conversation
-            conversation_messages.push(OllamaMessage {
-                role: "assistant".to_string(),
-                content: final_content.clone(),
-                tool_calls: agency_tool_calls.clone(),
-            });
-
-            debug!("Executing {} Agency tool(s)", agency_tool_calls.len());
-            let _ = tx.send(StreamMessage::Thinking(format!("Executing {} tool(s)...", agency_tool_calls.len())));
-
-            for tool_call in &agency_tool_calls {
-                let tool_name = &tool_call.function.name;
-                let mut args_value = tool_call.function.arguments.clone();
-
-                // Execute on_tool_call plugin hook
-                let tool_call_data = serde_json::json!({
-                    "tool_name": tool_name,
-                    "arguments": args_value
-                });
-                if let Ok(modified_tool_data) = plugin_registry.execute_hook("on_tool_call", tool_call_data) {
-                    // Update arguments with modified data
-                    if let Some(modified_args) = modified_tool_data.get("arguments") {
-                        args_value = modified_args.clone();
-                    }
-                }
-
-                debug!("   🔧 Executing tool: {}", tool_name);
-                let _ = tx.send(StreamMessage::ToolCall(
-                    tool_name.clone(),
-                    serde_json::to_string(&args_value).unwrap_or_default()
-                ));
-
-                match tool_registry.execute(tool_name, args_value.clone()) {
-                    Ok(mut result) => {
-                        // Execute on_tool_result plugin hook
-                        let tool_result_data = serde_json::json!({
-                            "tool_name": tool_name,
-                            "arguments": args_value,
-                            "result": result
-                        });
-                        if let Ok(modified_result_data) = plugin_registry.execute_hook("on_tool_result", tool_result_data) {
-                            // Update result with modified data
-                            if let Some(modified_result) = modified_result_data.get("result") {
-                                result = modified_result.clone();
-                            }
-                        }
-
-                        debug!("   ✅ Tool result: {}", serde_json::to_string_pretty(&result)?);
-                        let _ = tx.send(StreamMessage::ToolResult(
-                            tool_name.clone(),
-                            serde_json::to_string(&result).unwrap_or_default()
-                        ));
-
-                        // Add tool result to conversation
-                        conversation_messages.push(OllamaMessage {
-                            role: "tool".to_string(),
-                            content: serde_json::to_string(&result)?,
-                            tool_calls: vec![],
-                        });
-                    }
-                    Err(e) => {
-                        error!("   ❌ Error executing tool {}: {}", tool_name, e);
-                        let _ = tx.send(StreamMessage::Error(format!("Tool {} failed: {}", tool_name, e)));
-
-                        // Add error to conversation
-                        conversation_messages.push(OllamaMessage {
-                            role: "tool".to_string(),
-                            content: format!("{{\"error\": \"{}\"}}", e),
-                            tool_calls: vec![],
-                        });
-                    }
-                }
-            }
-
-            // Continue loop to send tool results back to LLM
-            debug!("Sending tool results back to LLM");
-            let _ = tx.send(StreamMessage::Thinking("Processing tool results...".to_string()));
-        }
-
-        // If there are client tools, return them to the client
-        if !client_tool_calls.is_empty() {
-            debug!("Returning {} client tool call(s) to client", client_tool_calls.len());
-
-            // Send the content first
-            let _ = tx.send(StreamMessage::Content(final_content.clone()));
-
-            // Send tool calls
-            for tc in &client_tool_calls {
-                let args_json = serde_json::to_string(&tc.function.arguments).unwrap_or_default();
-                let _ = tx.send(StreamMessage::ToolCall(tc.function.name.clone(), args_json));
-            }
-
-            // Send done with tool calls
-            let _ = tx.send(StreamMessage::DoneWithToolCalls);
-
-            // Add assistant message with client tool calls to conversation
-            conversation_messages.push(OllamaMessage {
-                role: "assistant".to_string(),
-                content: final_content.clone(),
-                tool_calls: client_tool_calls.clone(),
-            });
-
-            return Ok(ToolLoopResult::ClientToolCalls(final_content, client_tool_calls));
-        }
+    // Convert ConversationLoopResult to ToolLoopResult
+    if result.client_tool_calls.is_empty() {
+        Ok(ToolLoopResult::FinalResponse(result.content))
+    } else {
+        Ok(ToolLoopResult::ClientToolCalls(result.content, result.client_tool_calls))
     }
-
-    // Execute post_response plugin hook
-    let response_data = serde_json::json!({
-        "content": assistant_response
-    });
-    if let Ok(modified_response) = plugin_registry.execute_hook("post_response", response_data) {
-        // Update assistant_response with modified content
-        if let Some(modified_content) = modified_response.get("content") {
-            if let Some(content_str) = modified_content.as_str() {
-                assistant_response = content_str.to_string();
-            }
-        }
-    }
-
-    // Execute on_conversation_turn plugin hook
-    let turn_data = serde_json::json!({
-        "user_message": conversation_messages.first(),
-        "assistant_message": assistant_response.clone(),
-        "tool_calls_count": conversation_messages.iter()
-            .filter(|m| m.role == "assistant" && !m.tool_calls.is_empty())
-            .count()
-    });
-    let _ = plugin_registry.execute_hook("on_conversation_turn", turn_data);
-
-    let _ = tx.send(StreamMessage::Done);
-    Ok(ToolLoopResult::FinalResponse(assistant_response))
 }
 
 /// Execute the tool loop - similar to run_conversation in main.rs but for proxy mode
