@@ -649,10 +649,16 @@ fn setup_http_fetch(ctx: &rquickjs::Ctx, _config: &JsRuntimeConfig) -> Result<()
         globalThis.get_session = function(sessionId) {
             try {
                 var resultJson = __rust_get_session(sessionId);
+
+                // Handle null case (session doesn't exist)
+                if (resultJson === 'null') {
+                    return null;
+                }
+
                 var result = JSON.parse(resultJson);
 
                 // Check for error
-                if (result.__error) {
+                if (result && result.__error) {
                     throw new Error(result.__error);
                 }
 
@@ -670,7 +676,7 @@ fn setup_http_fetch(ctx: &rquickjs::Ctx, _config: &JsRuntimeConfig) -> Result<()
                 var result = JSON.parse(resultJson);
 
                 // Check for error
-                if (result.__error) {
+                if (result && result.__error) {
                     throw new Error(result.__error);
                 }
             } catch (e) {
@@ -685,11 +691,11 @@ fn setup_http_fetch(ctx: &rquickjs::Ctx, _config: &JsRuntimeConfig) -> Result<()
                 var result = JSON.parse(resultJson);
 
                 // Check for error
-                if (result.__error) {
+                if (result && result.__error) {
                     throw new Error(result.__error);
                 }
 
-                return result.deleted;
+                return result ? result.deleted : false;
             } catch (e) {
                 throw new Error('Failed to clear session: ' + String(e));
             }
@@ -731,11 +737,11 @@ fn setup_http_fetch(ctx: &rquickjs::Ctx, _config: &JsRuntimeConfig) -> Result<()
                 var result = JSON.parse(resultJson);
 
                 // Check for error
-                if (result.__error) {
+                if (result && result.__error) {
                     throw new Error(result.__error);
                 }
 
-                return result.success;
+                return result ? result.success : false;
             } catch (e) {
                 throw new Error('Failed to set document: ' + String(e));
             }
@@ -756,15 +762,17 @@ fn setup_http_fetch(ctx: &rquickjs::Ctx, _config: &JsRuntimeConfig) -> Result<()
                 var result = JSON.parse(resultJson);
 
                 // Check for error
-                if (result.__error) {
+                if (result && result.__error) {
                     throw new Error(result.__error);
                 }
 
                 // Try to parse value as JSON, otherwise return as string
-                try {
-                    result.value = JSON.parse(result.value);
-                } catch (e) {
-                    // Value is not JSON, keep as string
+                if (result && result.value) {
+                    try {
+                        result.value = JSON.parse(result.value);
+                    } catch (e) {
+                        // Value is not JSON, keep as string
+                    }
                 }
 
                 return result;
@@ -782,11 +790,11 @@ fn setup_http_fetch(ctx: &rquickjs::Ctx, _config: &JsRuntimeConfig) -> Result<()
                 var result = JSON.parse(resultJson);
 
                 // Check for error
-                if (result.__error) {
+                if (result && result.__error) {
                     throw new Error(result.__error);
                 }
 
-                return result.deleted;
+                return result ? result.deleted : false;
             } catch (e) {
                 throw new Error('Failed to delete document: ' + String(e));
             }
@@ -801,11 +809,11 @@ fn setup_http_fetch(ctx: &rquickjs::Ctx, _config: &JsRuntimeConfig) -> Result<()
                 var result = JSON.parse(resultJson);
 
                 // Check for error
-                if (result.__error) {
+                if (result && result.__error) {
                     throw new Error(result.__error);
                 }
 
-                return result;
+                return result || [];
             } catch (e) {
                 throw new Error('Failed to list documents: ' + String(e));
             }
