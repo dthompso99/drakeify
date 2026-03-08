@@ -20,5 +20,6 @@ Key features:
 
 - **Transparent proxying** – Drakeify tools remain invisible to the client while still allowing client-side tools to pass through normally.  Agents like copilot and claude can be used, with enhanced capabilities.
 
-for plugin development, see [PLUGINS.md](PLUGINS.md)
-for tool development, see [TOOLS.md](TOOLS.md)
+for plugin development, see [PLUGINS.md](PLUGINS.md).
+
+for tool development, see [TOOLS.md](TOOLS.md).

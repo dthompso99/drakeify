@@ -566,7 +566,7 @@ async fn handle_streaming_request(
                 Ok(r) => r,
                 Err(e) => {
                     let _ = tx_clone.send(StreamMessage::Error(format!("Failed to create tool registry: {}", e)));
-                    return;
+                    return None;
                 }
             };
 
@@ -586,7 +586,7 @@ async fn handle_streaming_request(
                 Ok(r) => r,
                 Err(e) => {
                     let _ = tx_clone.send(StreamMessage::Error(format!("Failed to create plugin registry: {}", e)));
-                    return;
+                    return None;
                 }
             };
 
@@ -605,15 +605,35 @@ async fn handle_streaming_request(
             ) {
                 Ok(_) => {
                     // Stream messages are already sent via tx_clone
+                    // Return the updated messages for session saving
+                    Some(conversation_messages)
                 }
                 Err(e) => {
                     let _ = tx_clone.send(StreamMessage::Error(format!("Error: {}", e)));
+                    None
                 }
             }
         }).await;
 
-        if let Err(e) = result {
-            let _ = tx.send(StreamMessage::Error(format!("Task error: {}", e)));
+        match result {
+            Ok(Some(updated_messages)) => {
+                // Save session after streaming completes
+                let session_id = format!("proxy_session_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
+                let messages_json = serde_json::to_string(&updated_messages).unwrap_or_else(|_| "[]".to_string());
+                let metadata_json = "{}".to_string();
+
+                if let Err(e) = state.database.upsert_session(&session_id, &account_id, &messages_json, &metadata_json).await {
+                    error!("Failed to save streaming proxy session {}: {}", session_id, e);
+                } else {
+                    debug!("✅ Saved streaming proxy session {} with {} messages", session_id, updated_messages.len());
+                }
+            }
+            Ok(None) => {
+                // Error already sent via tx_clone
+            }
+            Err(e) => {
+                let _ = tx.send(StreamMessage::Error(format!("Task error: {}", e)));
+            }
         }
     });
 
@@ -1015,18 +1035,38 @@ async fn chat_completions_handler(
         }
 
         // Execute the tool loop with plugin support and client tools
-        execute_tool_loop_sync(
+        let loop_result = execute_tool_loop_sync(
             &mut conversation_messages,
             &state_clone,
             &tool_registry,
             &plugin_registry,
             &client_tools,
-        )
+        )?;
+
+        // Return both the loop result and the updated messages
+        Ok::<(ToolLoopResult, Vec<OllamaMessage>), anyhow::Error>((loop_result, conversation_messages))
     }).await;
 
     // Handle the result from the blocking task
     match result {
-        Ok(Ok(ToolLoopResult::FinalResponse(final_content))) => {
+        Ok(Ok((ToolLoopResult::FinalResponse(final_content), updated_messages))) => {
+            // Generate session ID and save session
+            let session_id = format!("proxy_session_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
+            let messages_json = serde_json::to_string(&updated_messages).unwrap_or_else(|_| "[]".to_string());
+            let metadata_json = "{}".to_string(); // Empty metadata for now
+
+            // Save session asynchronously (don't block response)
+            let db_clone = state.database.clone();
+            let account_id_clone = account_id.clone();
+            let session_id_clone = session_id.clone();
+            tokio::spawn(async move {
+                if let Err(e) = db_clone.upsert_session(&session_id_clone, &account_id_clone, &messages_json, &metadata_json).await {
+                    error!("Failed to save proxy session {}: {}", session_id_clone, e);
+                } else {
+                    debug!("✅ Saved proxy session {} with {} messages", session_id_clone, updated_messages.len());
+                }
+            });
+
             let response = ChatCompletionResponse {
                 id: format!("chatcmpl-{}", chrono::Utc::now().timestamp()),
                 object: "chat.completion".to_string(),
@@ -1044,10 +1084,27 @@ async fn chat_completions_handler(
                 }],
             };
 
-            info!("✅ Sending final response");
+            info!("✅ Sending final response (session: {})", session_id);
             (StatusCode::OK, Json(response)).into_response()
         }
-        Ok(Ok(ToolLoopResult::ClientToolCalls(content, ollama_tool_calls))) => {
+        Ok(Ok((ToolLoopResult::ClientToolCalls(content, ollama_tool_calls), updated_messages))) => {
+            // Generate session ID and save session
+            let session_id = format!("proxy_session_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
+            let messages_json = serde_json::to_string(&updated_messages).unwrap_or_else(|_| "[]".to_string());
+            let metadata_json = "{}".to_string(); // Empty metadata for now
+
+            // Save session asynchronously (don't block response)
+            let db_clone = state.database.clone();
+            let account_id_clone = account_id.clone();
+            let session_id_clone = session_id.clone();
+            tokio::spawn(async move {
+                if let Err(e) = db_clone.upsert_session(&session_id_clone, &account_id_clone, &messages_json, &metadata_json).await {
+                    error!("Failed to save proxy session {}: {}", session_id_clone, e);
+                } else {
+                    debug!("✅ Saved proxy session {} with {} messages", session_id_clone, updated_messages.len());
+                }
+            });
+
             debug!("Converting {} Ollama tool calls to OpenAI format", ollama_tool_calls.len());
 
             // Convert Ollama tool calls to OpenAI format
@@ -1081,7 +1138,7 @@ async fn chat_completions_handler(
                 }],
             };
 
-            info!("✅ Sending response with {} client tool call(s)", ollama_tool_calls.len());
+            info!("✅ Sending response with {} client tool call(s) (session: {})", ollama_tool_calls.len(), session_id);
             debug!("Response: {:?}", response);
 
             // Try to serialize to JSON to check for errors
