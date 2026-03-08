@@ -674,6 +674,53 @@ impl ToolRegistry {
                 })?;
                 ctx.globals().set("__rust_clear_session", clear_session_fn)?;
 
+                let database_clone4 = db.clone();
+                let account_id_clone4 = self.account_id.clone();
+                let session_id_clone = self.session_id.clone();
+
+                // schedule_task(prompt, run_at, context) -> { job_id }
+                let schedule_task_fn = Function::new(ctx.clone(), move |prompt: String, run_at: String, context_json: String| -> String {
+                    let db_clone = database_clone4.clone();
+                    let account_id = account_id_clone4.clone();
+                    let session_id = session_id_clone.clone();
+
+                    if let Some(h) = tokio::runtime::Handle::try_current().ok() {
+                        tokio::task::block_in_place(|| {
+                            h.block_on(async move {
+                                // Parse context if provided
+                                let context_opt = if context_json.is_empty() {
+                                    None
+                                } else {
+                                    Some(context_json.as_str())
+                                };
+
+                                match db_clone.create_scheduled_job(
+                                    &account_id,
+                                    session_id.as_deref(),
+                                    &prompt,
+                                    context_opt,
+                                    &run_at
+                                ).await {
+                                    Ok(job_id) => serde_json::json!({
+                                        "success": true,
+                                        "job_id": job_id
+                                    }).to_string(),
+                                    Err(e) => {
+                                        serde_json::json!({
+                                            "__error": format!("Failed to schedule task: {}", e)
+                                        }).to_string()
+                                    }
+                                }
+                            })
+                        })
+                    } else {
+                        serde_json::json!({
+                            "__error": "No tokio runtime available"
+                        }).to_string()
+                    }
+                })?;
+                ctx.globals().set("__rust_schedule_task", schedule_task_fn)?;
+
                 Ok::<(), anyhow::Error>(())
             })?;
         }

@@ -8,14 +8,12 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use tower_http::cors::{CorsLayer, Any};
-use tracing::{info, debug, error, warn};
+use tracing::{info, debug, error};
 use anyhow::Result;
-use futures_util::stream::Stream;
 use tokio_stream::StreamExt;
 
-use crate::llm::{OllamaMessage, OllamaRequest, OllamaOptions, OllamaFunction, OllamaToolCall, OllamaFunctionCall, LlmConfig};
+use crate::llm::{OllamaMessage, OllamaToolCall, LlmConfig};
 use crate::js_runtime::JsRuntimeConfig;
 use crate::database::Database;
 use crate::StreamMessage;
@@ -359,27 +357,6 @@ fn anthropic_to_openai(anthropic_req: AnthropicMessagesRequest) -> ChatCompletio
     }
 }
 
-/// Convert OpenAI response to Anthropic Messages format
-fn openai_to_anthropic(openai_resp: ChatCompletionResponse) -> AnthropicMessagesResponse {
-    let choice = &openai_resp.choices[0];
-    let content = vec![AnthropicContentBlock::Text {
-        text: choice.message.content.as_ref().map(|c| c.to_text()).unwrap_or_default(),
-    }];
-
-    AnthropicMessagesResponse {
-        id: openai_resp.id,
-        response_type: "message".to_string(),
-        role: "assistant".to_string(),
-        content,
-        model: openai_resp.model,
-        stop_reason: choice.finish_reason.clone(),
-        usage: AnthropicUsage {
-            input_tokens: 0,
-            output_tokens: 0,
-        },
-    }
-}
-
 /// Start the proxy server
 pub async fn start_proxy_server(
     host: String,
@@ -437,37 +414,6 @@ pub async fn start_proxy_server(
     axum::serve(listener, app).await?;
 
     Ok(())
-}
-
-/// Interpolate secrets in a string
-/// Replaces ${secret.scope.name} with the actual secret value from the database
-async fn interpolate_secrets(text: &str, database: &Database) -> Result<String> {
-    let mut result = text.to_string();
-
-    // Find all ${secret.scope.name} patterns
-    let re = regex::Regex::new(r"\$\{secret\.([^}]+)\}").unwrap();
-
-    for cap in re.captures_iter(text) {
-        let full_match = &cap[0];
-        let secret_key = &cap[1];
-
-        // Get the secret value from database
-        match database.get_secret(secret_key).await {
-            Ok(Some(value)) => {
-                result = result.replace(full_match, &value);
-            }
-            Ok(None) => {
-                warn!("Secret not found: {}", secret_key);
-                // Leave the placeholder as-is if secret not found
-            }
-            Err(e) => {
-                error!("Failed to get secret {}: {}", secret_key, e);
-                // Leave the placeholder as-is on error
-            }
-        }
-    }
-
-    Ok(result)
 }
 
 /// Result of the tool execution loop

@@ -1,8 +1,6 @@
 use anyhow::{Result, Context as AnyhowContext};
-use rquickjs::{Context, Function, Runtime, Ctx, Value};
+use rquickjs::{Context, Function, Runtime};
 use std::rc::Rc;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 use std::time::Duration;
 use std::collections::HashMap;
 

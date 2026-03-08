@@ -4,6 +4,7 @@ use sqlx::{Pool, Sqlite, Postgres};
 use tracing::{info, debug};
 
 /// Database abstraction supporting both SQLite and PostgreSQL
+#[derive(Clone)]
 pub enum Database {
     Sqlite(Pool<Sqlite>),
     Postgres(Pool<Postgres>),
@@ -341,6 +342,174 @@ impl Database {
         Ok(sessions)
     }
 
+    /// Create a scheduled job
+    pub async fn create_scheduled_job(
+        &self,
+        account_id: &str,
+        session_id: Option<&str>,
+        prompt: &str,
+        context: Option<&str>,
+        run_at: &str,
+    ) -> Result<i64> {
+        debug!("Creating scheduled job for account: {} at {}", account_id, run_at);
+
+        let job_id = match self {
+            Database::Sqlite(pool) => {
+                sqlx::query_scalar::<_, i64>(
+                    "INSERT INTO scheduled_jobs (account_id, session_id, prompt, context, run_at)
+                     VALUES (?, ?, ?, ?, ?)
+                     RETURNING id"
+                )
+                    .bind(account_id)
+                    .bind(session_id)
+                    .bind(prompt)
+                    .bind(context)
+                    .bind(run_at)
+                    .fetch_one(pool)
+                    .await?
+            }
+            Database::Postgres(pool) => {
+                sqlx::query_scalar::<_, i64>(
+                    "INSERT INTO scheduled_jobs (account_id, session_id, prompt, context, run_at)
+                     VALUES ($1, $2, $3, $4, $5)
+                     RETURNING id"
+                )
+                    .bind(account_id)
+                    .bind(session_id)
+                    .bind(prompt)
+                    .bind(context)
+                    .bind(run_at)
+                    .fetch_one(pool)
+                    .await?
+            }
+        };
+
+        Ok(job_id)
+    }
+
+    /// Claim a pending scheduled job (HA-safe using FOR UPDATE SKIP LOCKED)
+    /// Returns the job details if one was claimed
+    pub async fn claim_scheduled_job(&self, pod_id: &str) -> Result<Option<ScheduledJob>> {
+        let job = match self {
+            Database::Sqlite(pool) => {
+                // SQLite doesn't support FOR UPDATE SKIP LOCKED, but it's single-instance anyway
+                // Use a simple UPDATE...RETURNING pattern
+                sqlx::query_as::<_, ScheduledJob>(
+                    "UPDATE scheduled_jobs
+                     SET status = 'running',
+                         locked_at = datetime('now'),
+                         locked_by = ?
+                     WHERE id = (
+                         SELECT id FROM scheduled_jobs
+                         WHERE status = 'pending'
+                           AND run_at <= datetime('now')
+                         ORDER BY run_at
+                         LIMIT 1
+                     )
+                     RETURNING id, account_id, session_id, prompt, context, run_at, status, locked_at, locked_by, created_at, completed_at, result, error"
+                )
+                    .bind(pod_id)
+                    .fetch_optional(pool)
+                    .await?
+            }
+            Database::Postgres(pool) => {
+                // PostgreSQL supports FOR UPDATE SKIP LOCKED for true HA safety
+                sqlx::query_as::<_, ScheduledJob>(
+                    "UPDATE scheduled_jobs
+                     SET status = 'running',
+                         locked_at = NOW(),
+                         locked_by = $1
+                     WHERE id = (
+                         SELECT id FROM scheduled_jobs
+                         WHERE status = 'pending'
+                           AND run_at <= NOW()
+                         ORDER BY run_at
+                         LIMIT 1
+                         FOR UPDATE SKIP LOCKED
+                     )
+                     RETURNING id, account_id, session_id, prompt, context, run_at, status, locked_at, locked_by, created_at, completed_at, result, error"
+                )
+                    .bind(pod_id)
+                    .fetch_optional(pool)
+                    .await?
+            }
+        };
+
+        Ok(job)
+    }
+
+    /// Mark a scheduled job as completed
+    pub async fn complete_scheduled_job(&self, job_id: i64, result: &str) -> Result<()> {
+        debug!("Completing scheduled job: {}", job_id);
+
+        match self {
+            Database::Sqlite(pool) => {
+                sqlx::query(
+                    "UPDATE scheduled_jobs
+                     SET status = 'completed',
+                         completed_at = datetime('now'),
+                         result = ?
+                     WHERE id = ?"
+                )
+                    .bind(result)
+                    .bind(job_id)
+                    .execute(pool)
+                    .await?;
+            }
+            Database::Postgres(pool) => {
+                sqlx::query(
+                    "UPDATE scheduled_jobs
+                     SET status = 'completed',
+                         completed_at = NOW(),
+                         result = $1
+                     WHERE id = $2"
+                )
+                    .bind(result)
+                    .bind(job_id)
+                    .execute(pool)
+                    .await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Mark a scheduled job as failed
+    pub async fn fail_scheduled_job(&self, job_id: i64, error: &str) -> Result<()> {
+        debug!("Failing scheduled job: {}", job_id);
+
+        match self {
+            Database::Sqlite(pool) => {
+                sqlx::query(
+                    "UPDATE scheduled_jobs
+                     SET status = 'failed',
+                         completed_at = datetime('now'),
+                         error = ?
+                     WHERE id = ?"
+                )
+                    .bind(error)
+                    .bind(job_id)
+                    .execute(pool)
+                    .await?;
+            }
+            Database::Postgres(pool) => {
+                sqlx::query(
+                    "UPDATE scheduled_jobs
+                     SET status = 'failed',
+                         completed_at = NOW(),
+                         error = $1
+                     WHERE id = $2"
+                )
+                    .bind(error)
+                    .bind(job_id)
+                    .execute(pool)
+                    .await?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Sanitize database URL for logging (hide passwords)
     fn sanitize_url(url: &str) -> String {
         if let Some(at_pos) = url.find('@') {
@@ -352,6 +521,24 @@ impl Database {
         }
         url.to_string()
     }
+}
+
+/// Scheduled job record from database
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ScheduledJob {
+    pub id: i64,
+    pub account_id: String,
+    pub session_id: Option<String>,
+    pub prompt: String,
+    pub context: Option<String>,
+    pub run_at: String,
+    pub status: String,
+    pub locked_at: Option<String>,
+    pub locked_by: Option<String>,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+    pub result: Option<String>,
+    pub error: Option<String>,
 }
 
 

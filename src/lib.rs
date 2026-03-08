@@ -8,6 +8,7 @@ pub mod session;
 pub mod proxy;
 pub mod registry;
 pub mod database;
+pub mod scheduler;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,7 @@ pub use js_runtime::JsRuntimeConfig;
 pub use session::SessionManager;
 pub use registry::{RegistryClient, PackageMetadata, PackageType};
 pub use database::Database;
+pub use scheduler::{SchedulerConfig, start_scheduler};
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone)]
 pub struct DrakeifyConfig {
@@ -102,6 +104,14 @@ pub struct DrakeifyConfig {
     // Database Configuration
     #[serde(default = "default_database_url")]
     pub database_url: String,
+
+    // Scheduler Configuration
+    #[serde(default = "default_scheduler_enabled")]
+    pub scheduler_enabled: bool,
+    #[serde(default = "default_scheduler_poll_interval_secs")]
+    pub scheduler_poll_interval_secs: u64,
+    #[serde(default = "default_scheduler_pod_id")]
+    pub scheduler_pod_id: String,
 }
 
 impl DrakeifyConfig {
@@ -183,6 +193,15 @@ impl DrakeifyConfig {
         if let Ok(val) = env::var("DRAKEIFY_DATABASE_URL") {
             config.database_url = val;
         }
+        if let Ok(val) = env::var("DRAKEIFY_SCHEDULER_ENABLED") {
+            config.scheduler_enabled = val.parse().unwrap_or(config.scheduler_enabled);
+        }
+        if let Ok(val) = env::var("DRAKEIFY_SCHEDULER_POLL_INTERVAL_SECS") {
+            config.scheduler_poll_interval_secs = val.parse().unwrap_or(config.scheduler_poll_interval_secs);
+        }
+        if let Ok(val) = env::var("DRAKEIFY_SCHEDULER_POD_ID") {
+            config.scheduler_pod_id = val;
+        }
 
         // Apply defaults for empty string values
         if config.registry_url.is_empty() {
@@ -190,6 +209,9 @@ impl DrakeifyConfig {
         }
         if config.database_url.is_empty() {
             config.database_url = default_database_url();
+        }
+        if config.scheduler_pod_id.is_empty() {
+            config.scheduler_pod_id = default_scheduler_pod_id();
         }
 
         Ok(config)
@@ -257,6 +279,21 @@ fn default_database_url() -> String {
     "sqlite://data/drakeify.db".to_string()
 }
 
+fn default_scheduler_enabled() -> bool {
+    true
+}
+
+fn default_scheduler_poll_interval_secs() -> u64 {
+    30  // Poll every 30 seconds
+}
+
+fn default_scheduler_pod_id() -> String {
+    use std::env;
+    // Use hostname if available, otherwise generate a random ID
+    env::var("HOSTNAME")
+        .unwrap_or_else(|_| format!("drakeify-{}", uuid::Uuid::new_v4()))
+}
+
 /// Initialize logging based on configuration
 pub fn init_logging(config: &DrakeifyConfig) -> Result<()> {
     let filter = EnvFilter::try_from_default_env()
@@ -281,7 +318,7 @@ pub async fn run_conversation(
 ) -> Result<String> {
     use tracing::{debug, error, info};
 
-    let mut assistant_response = String::new();
+    let mut assistant_response;
 
     loop {
         let mut current_request = OllamaRequest {
@@ -553,7 +590,7 @@ pub async fn execute_unified_conversation_loop(
 ) -> Result<ConversationLoopResult> {
     use tracing::{debug, error};
 
-    let mut assistant_response = String::new();
+    let mut assistant_response;
 
     // Send initial thinking message if streaming
     if let StreamingMode::Channel { ref tx } = config.streaming {

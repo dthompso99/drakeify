@@ -125,6 +125,7 @@ pub struct OllamaRequest {
 struct OllamaResponse {
     response: Option<String>,
     message: Option<OllamaMessage>,
+    #[allow(dead_code)]
     model: String,
     thinking: Option<String>,
     done: bool,
@@ -134,15 +135,20 @@ struct OllamaResponse {
 
 #[derive(Deserialize, Debug)]
 struct OpenAIResponse {
+    #[allow(dead_code)]
     id: String,
+    #[allow(dead_code)]
     object: String,
+    #[allow(dead_code)]
     created: u64,
+    #[allow(dead_code)]
     model: String,
     choices: Vec<OpenAIChoice>,
 }
 
 #[derive(Deserialize, Debug)]
 struct OpenAIChoice {
+    #[allow(dead_code)]
     index: u32,
     #[serde(default)]
     delta: Option<OpenAIDelta>,
@@ -154,6 +160,7 @@ struct OpenAIChoice {
 // Non-streaming message
 #[derive(Deserialize, Debug)]
 struct OpenAIMessage {
+    #[allow(dead_code)]
     role: String,
     content: String,
     #[serde(default)]
@@ -162,6 +169,7 @@ struct OpenAIMessage {
 
 #[derive(Deserialize, Debug)]
 struct OpenAIDelta {
+    #[allow(dead_code)]
     role: Option<String>,
     content: Option<String>,
     #[serde(default)]
@@ -173,6 +181,7 @@ struct OpenAIToolCall {
     id: Option<String>,
     index: u32,
     #[serde(rename = "type")]
+    #[allow(dead_code)]
     call_type: String,
     function: OpenAIFunctionCall,
 }
@@ -183,7 +192,7 @@ struct OpenAIFunctionCall {
     arguments: String,  // Note: This is a JSON string, not a Value
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct LlmConfig {
     pub host: String,
     pub endpoint: String,
