@@ -721,11 +721,140 @@ impl ToolRegistry {
                 })?;
                 ctx.globals().set("__rust_schedule_task", schedule_task_fn)?;
 
+                // Document store functions
+                let database_clone5 = db.clone();
+                let account_id_clone5 = self.account_id.clone();
+
+                // set_document(namespace, key, value, metadata) -> { success: bool }
+                let set_document_fn = Function::new(ctx.clone(), move |namespace: String, key: String, value: String, metadata: String| -> String {
+                    let db_clone = database_clone5.clone();
+                    let account_id = account_id_clone5.clone();
+
+                    if let Some(h) = tokio::runtime::Handle::try_current().ok() {
+                        tokio::task::block_in_place(|| {
+                            h.block_on(async move {
+                                match db_clone.set_document(&namespace, &key, &value, &account_id, Some(&metadata)).await {
+                                    Ok(_) => serde_json::json!({ "success": true }).to_string(),
+                                    Err(e) => {
+                                        serde_json::json!({
+                                            "__error": format!("Failed to set document: {}", e)
+                                        }).to_string()
+                                    }
+                                }
+                            })
+                        })
+                    } else {
+                        serde_json::json!({
+                            "__error": "No tokio runtime available"
+                        }).to_string()
+                    }
+                })?;
+                ctx.globals().set("__rust_set_document", set_document_fn)?;
+
+                let database_clone6 = db.clone();
+                let account_id_clone6 = self.account_id.clone();
+
+                // get_document(namespace, key) -> { value, metadata } | null
+                let get_document_fn = Function::new(ctx.clone(), move |namespace: String, key: String| -> String {
+                    let db_clone = database_clone6.clone();
+                    let account_id = account_id_clone6.clone();
+
+                    if let Some(h) = tokio::runtime::Handle::try_current().ok() {
+                        tokio::task::block_in_place(|| {
+                            h.block_on(async move {
+                                match db_clone.get_document(&namespace, &key, &account_id).await {
+                                    Ok(Some(doc)) => {
+                                        serde_json::json!({
+                                            "value": doc.value,
+                                            "metadata": serde_json::from_str::<serde_json::Value>(&doc.metadata).unwrap_or(serde_json::json!({})),
+                                            "created_at": doc.created_at,
+                                            "updated_at": doc.updated_at
+                                        }).to_string()
+                                    }
+                                    Ok(None) => "null".to_string(),
+                                    Err(e) => {
+                                        serde_json::json!({
+                                            "__error": format!("Failed to get document: {}", e)
+                                        }).to_string()
+                                    }
+                                }
+                            })
+                        })
+                    } else {
+                        serde_json::json!({
+                            "__error": "No tokio runtime available"
+                        }).to_string()
+                    }
+                })?;
+                ctx.globals().set("__rust_get_document", get_document_fn)?;
+
+                let database_clone7 = db.clone();
+                let account_id_clone7 = self.account_id.clone();
+
+                // delete_document(namespace, key) -> { deleted: bool }
+                let delete_document_fn = Function::new(ctx.clone(), move |namespace: String, key: String| -> String {
+                    let db_clone = database_clone7.clone();
+                    let account_id = account_id_clone7.clone();
+
+                    if let Some(h) = tokio::runtime::Handle::try_current().ok() {
+                        tokio::task::block_in_place(|| {
+                            h.block_on(async move {
+                                match db_clone.delete_document(&namespace, &key, &account_id).await {
+                                    Ok(deleted) => serde_json::json!({ "deleted": deleted }).to_string(),
+                                    Err(e) => {
+                                        serde_json::json!({
+                                            "__error": format!("Failed to delete document: {}", e)
+                                        }).to_string()
+                                    }
+                                }
+                            })
+                        })
+                    } else {
+                        serde_json::json!({
+                            "__error": "No tokio runtime available"
+                        }).to_string()
+                    }
+                })?;
+                ctx.globals().set("__rust_delete_document", delete_document_fn)?;
+
+                let database_clone8 = db.clone();
+                let account_id_clone8 = self.account_id.clone();
+
+                // list_documents(namespace) -> [keys]
+                let list_documents_fn = Function::new(ctx.clone(), move |namespace: String| -> String {
+                    let db_clone = database_clone8.clone();
+                    let account_id = account_id_clone8.clone();
+
+                    if let Some(h) = tokio::runtime::Handle::try_current().ok() {
+                        tokio::task::block_in_place(|| {
+                            h.block_on(async move {
+                                match db_clone.list_documents(&namespace, &account_id).await {
+                                    Ok(keys) => serde_json::json!(keys).to_string(),
+                                    Err(e) => {
+                                        serde_json::json!({
+                                            "__error": format!("Failed to list documents: {}", e)
+                                        }).to_string()
+                                    }
+                                }
+                            })
+                        })
+                    } else {
+                        serde_json::json!({
+                            "__error": "No tokio runtime available"
+                        }).to_string()
+                    }
+                })?;
+                ctx.globals().set("__rust_list_documents", list_documents_fn)?;
+
                 Ok::<(), anyhow::Error>(())
             })?;
         }
 
         ctx.with(|ctx| {
+            // Inject document namespace for this tool
+            let namespace = format!("tool:{}", tool_name);
+            ctx.globals().set("__document_namespace", namespace)?;
+
             // Evaluate the tool code to get the tool object
             let tool_obj: Object = ctx.eval(js_code.as_bytes())?;
 

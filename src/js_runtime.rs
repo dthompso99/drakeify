@@ -695,6 +695,122 @@ fn setup_http_fetch(ctx: &rquickjs::Ctx, _config: &JsRuntimeConfig) -> Result<()
             }
         };
 
+        // Placeholder for document store functions - will be replaced by Rust if database is available
+        globalThis.__rust_set_document = function(namespace, key, value, metadata) {
+            throw new Error('Document store not available in this context');
+        };
+
+        globalThis.__rust_get_document = function(namespace, key) {
+            throw new Error('Document store not available in this context');
+        };
+
+        globalThis.__rust_delete_document = function(namespace, key) {
+            throw new Error('Document store not available in this context');
+        };
+
+        globalThis.__rust_list_documents = function(namespace) {
+            throw new Error('Document store not available in this context');
+        };
+
+        // Document store wrapper functions
+        // Note: These functions automatically namespace keys based on the tool/plugin name
+        // Tools/plugins should call set_document(key, value) and the namespace is handled automatically
+
+        globalThis.set_document = function(key, value, metadata) {
+            try {
+                // Get the current namespace (injected by tool/plugin registry)
+                var namespace = globalThis.__document_namespace || 'default';
+
+                // Convert value to string if it's an object
+                var valueStr = typeof value === 'string' ? value : JSON.stringify(value);
+
+                // Convert metadata to string if provided
+                var metadataStr = metadata ? (typeof metadata === 'string' ? metadata : JSON.stringify(metadata)) : '{}';
+
+                var resultJson = __rust_set_document(namespace, key, valueStr, metadataStr);
+                var result = JSON.parse(resultJson);
+
+                // Check for error
+                if (result.__error) {
+                    throw new Error(result.__error);
+                }
+
+                return result.success;
+            } catch (e) {
+                throw new Error('Failed to set document: ' + String(e));
+            }
+        };
+
+        globalThis.get_document = function(key) {
+            try {
+                // Get the current namespace (injected by tool/plugin registry)
+                var namespace = globalThis.__document_namespace || 'default';
+
+                var resultJson = __rust_get_document(namespace, key);
+
+                // Handle null case
+                if (resultJson === 'null') {
+                    return null;
+                }
+
+                var result = JSON.parse(resultJson);
+
+                // Check for error
+                if (result.__error) {
+                    throw new Error(result.__error);
+                }
+
+                // Try to parse value as JSON, otherwise return as string
+                try {
+                    result.value = JSON.parse(result.value);
+                } catch (e) {
+                    // Value is not JSON, keep as string
+                }
+
+                return result;
+            } catch (e) {
+                throw new Error('Failed to get document: ' + String(e));
+            }
+        };
+
+        globalThis.delete_document = function(key) {
+            try {
+                // Get the current namespace (injected by tool/plugin registry)
+                var namespace = globalThis.__document_namespace || 'default';
+
+                var resultJson = __rust_delete_document(namespace, key);
+                var result = JSON.parse(resultJson);
+
+                // Check for error
+                if (result.__error) {
+                    throw new Error(result.__error);
+                }
+
+                return result.deleted;
+            } catch (e) {
+                throw new Error('Failed to delete document: ' + String(e));
+            }
+        };
+
+        globalThis.list_documents = function() {
+            try {
+                // Get the current namespace (injected by tool/plugin registry)
+                var namespace = globalThis.__document_namespace || 'default';
+
+                var resultJson = __rust_list_documents(namespace);
+                var result = JSON.parse(resultJson);
+
+                // Check for error
+                if (result.__error) {
+                    throw new Error(result.__error);
+                }
+
+                return result;
+            } catch (e) {
+                throw new Error('Failed to list documents: ' + String(e));
+            }
+        };
+
         // Placeholder for LLM function - will be replaced by Rust if LLM config is available
         globalThis.__rust_call_llm = function(optionsJson) {
             throw new Error('LLM not available in this context');

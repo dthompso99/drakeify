@@ -510,6 +510,166 @@ impl Database {
         Ok(())
     }
 
+    // ============================================================================
+    // Document Store Methods
+    // ============================================================================
+
+    /// Set a document in the store (create or update)
+    pub async fn set_document(
+        &self,
+        namespace: &str,
+        key: &str,
+        value: &str,
+        account_id: &str,
+        metadata: Option<&str>,
+    ) -> Result<()> {
+        let metadata = metadata.unwrap_or("{}");
+        debug!("Setting document: {}:{} for account: {}", namespace, key, account_id);
+
+        match self {
+            Database::Sqlite(pool) => {
+                sqlx::query(
+                    "INSERT INTO documents (namespace, key, value, account_id, metadata, created_at, updated_at)
+                     VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                     ON CONFLICT(namespace, key, account_id) DO UPDATE
+                     SET value = ?, metadata = ?, updated_at = datetime('now')"
+                )
+                    .bind(namespace)
+                    .bind(key)
+                    .bind(value)
+                    .bind(account_id)
+                    .bind(metadata)
+                    .bind(value)
+                    .bind(metadata)
+                    .execute(pool)
+                    .await?;
+            }
+            Database::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO documents (namespace, key, value, account_id, metadata, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5::jsonb, NOW(), NOW())
+                     ON CONFLICT(namespace, key, account_id) DO UPDATE
+                     SET value = $3, metadata = $5::jsonb, updated_at = NOW()"
+                )
+                    .bind(namespace)
+                    .bind(key)
+                    .bind(value)
+                    .bind(account_id)
+                    .bind(metadata)
+                    .execute(pool)
+                    .await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get a document from the store
+    pub async fn get_document(
+        &self,
+        namespace: &str,
+        key: &str,
+        account_id: &str,
+    ) -> Result<Option<Document>> {
+        debug!("Getting document: {}:{} for account: {}", namespace, key, account_id);
+
+        match self {
+            Database::Sqlite(pool) => {
+                let doc = sqlx::query_as::<_, Document>(
+                    "SELECT namespace, key, value, account_id, metadata, created_at, updated_at
+                     FROM documents
+                     WHERE namespace = ? AND key = ? AND account_id = ?"
+                )
+                    .bind(namespace)
+                    .bind(key)
+                    .bind(account_id)
+                    .fetch_optional(pool)
+                    .await?;
+                Ok(doc)
+            }
+            Database::Postgres(pool) => {
+                let doc = sqlx::query_as::<_, Document>(
+                    "SELECT namespace, key, value, account_id, metadata, created_at, updated_at
+                     FROM documents
+                     WHERE namespace = $1 AND key = $2 AND account_id = $3"
+                )
+                    .bind(namespace)
+                    .bind(key)
+                    .bind(account_id)
+                    .fetch_optional(pool)
+                    .await?;
+                Ok(doc)
+            }
+        }
+    }
+
+    /// Delete a document from the store
+    pub async fn delete_document(
+        &self,
+        namespace: &str,
+        key: &str,
+        account_id: &str,
+    ) -> Result<bool> {
+        debug!("Deleting document: {}:{} for account: {}", namespace, key, account_id);
+
+        match self {
+            Database::Sqlite(pool) => {
+                let result = sqlx::query(
+                    "DELETE FROM documents WHERE namespace = ? AND key = ? AND account_id = ?"
+                )
+                    .bind(namespace)
+                    .bind(key)
+                    .bind(account_id)
+                    .execute(pool)
+                    .await?;
+                Ok(result.rows_affected() > 0)
+            }
+            Database::Postgres(pool) => {
+                let result = sqlx::query(
+                    "DELETE FROM documents WHERE namespace = $1 AND key = $2 AND account_id = $3"
+                )
+                    .bind(namespace)
+                    .bind(key)
+                    .bind(account_id)
+                    .execute(pool)
+                    .await?;
+                Ok(result.rows_affected() > 0)
+            }
+        }
+    }
+
+    /// List all document keys in a namespace for an account
+    pub async fn list_documents(
+        &self,
+        namespace: &str,
+        account_id: &str,
+    ) -> Result<Vec<String>> {
+        debug!("Listing documents in namespace: {} for account: {}", namespace, account_id);
+
+        match self {
+            Database::Sqlite(pool) => {
+                let keys: Vec<(String,)> = sqlx::query_as(
+                    "SELECT key FROM documents WHERE namespace = ? AND account_id = ? ORDER BY key"
+                )
+                    .bind(namespace)
+                    .bind(account_id)
+                    .fetch_all(pool)
+                    .await?;
+                Ok(keys.into_iter().map(|(k,)| k).collect())
+            }
+            Database::Postgres(pool) => {
+                let keys: Vec<(String,)> = sqlx::query_as(
+                    "SELECT key FROM documents WHERE namespace = $1 AND account_id = $2 ORDER BY key"
+                )
+                    .bind(namespace)
+                    .bind(account_id)
+                    .fetch_all(pool)
+                    .await?;
+                Ok(keys.into_iter().map(|(k,)| k).collect())
+            }
+        }
+    }
+
     /// Sanitize database URL for logging (hide passwords)
     fn sanitize_url(url: &str) -> String {
         if let Some(at_pos) = url.find('@') {
@@ -539,6 +699,18 @@ pub struct ScheduledJob {
     pub completed_at: Option<String>,
     pub result: Option<String>,
     pub error: Option<String>,
+}
+
+/// Document record from database
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct Document {
+    pub namespace: String,
+    pub key: String,
+    pub value: String,
+    pub account_id: String,
+    pub metadata: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 
