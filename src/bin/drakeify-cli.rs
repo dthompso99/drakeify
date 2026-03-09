@@ -1423,8 +1423,8 @@ async fn handle_set_llm_config(db: &Database, id: String, json_value: String) ->
         enabled,
         metadata,
         account_id,
-        created_at: String::new(), // Will be set by database
-        updated_at: String::new(), // Will be set by database
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
     };
 
     db.upsert_llm_config(&config).await?;

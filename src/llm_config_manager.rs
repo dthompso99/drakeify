@@ -68,8 +68,8 @@ impl LlmConfigManager {
                     enabled: true,
                     metadata: "{}".to_string(),
                     account_id: env_config.account_id.clone(),
-                    created_at: String::new(),  // Will be set by database
-                    updated_at: String::new(),  // Will be set by database
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
                 };
 
                 db.upsert_llm_config(&default_config).await?;

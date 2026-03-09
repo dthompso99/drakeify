@@ -955,12 +955,12 @@ pub struct ScheduledJob {
     pub session_id: Option<String>,
     pub prompt: String,
     pub context: Option<String>,
-    pub run_at: String,
+    pub run_at: chrono::DateTime<chrono::Utc>,
     pub status: String,
-    pub locked_at: Option<String>,
+    pub locked_at: Option<chrono::DateTime<chrono::Utc>>,
     pub locked_by: Option<String>,
-    pub created_at: String,
-    pub completed_at: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
     pub result: Option<String>,
     pub error: Option<String>,
 }
@@ -973,8 +973,8 @@ pub struct Document {
     pub value: String,
     pub account_id: String,
     pub metadata: String,
-    pub created_at: String,
-    pub updated_at: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// LLM configuration record from database
@@ -992,8 +992,8 @@ pub struct LlmConfigRecord {
     pub enabled: bool,
     pub metadata: String,      // JSON object stored as string
     pub account_id: Option<String>,  // API key/account ID for the LLM provider
-    pub created_at: String,
-    pub updated_at: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl LlmConfigRecord {
