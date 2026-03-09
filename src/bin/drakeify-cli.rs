@@ -272,6 +272,8 @@ async fn handle_publish(
         tags: vec![],
         created: chrono::Utc::now().to_rfc3339(),
         default_config,
+        config_schema: None,
+        secrets_schema: None,
     };
 
     let mut client = RegistryClient::new(

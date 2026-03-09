@@ -34,6 +34,10 @@ pub struct PackageMetadata {
     pub created: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_config: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_schema: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secrets_schema: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -241,6 +245,8 @@ impl RegistryClient {
             tags: vec![],
             created: String::new(),
             default_config: None,
+            config_schema: None,
+            secrets_schema: None,
         };
 
         let reference = self.create_reference(&metadata)?;
