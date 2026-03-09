@@ -1398,6 +1398,44 @@
             });
         }
 
+        // Helper function to render configuration form fields
+        function renderConfigForm(configSchema, currentConfig) {
+            let html = '';
+            for (const [key, schema] of Object.entries(configSchema)) {
+                const value = currentConfig[key] !== undefined ? currentConfig[key] : schema.default;
+                const required = schema.required ? ' *' : '';
+
+                html += `
+                    <div style="margin-bottom: 1rem;">
+                        <label style="display: block; color: #cbd5e1; margin-bottom: 0.25rem; font-size: 14px;">
+                            ${key}${required}
+                        </label>
+                        <div style="color: #94a3b8; font-size: 12px; margin-bottom: 0.5rem;">${schema.description || ''}</div>
+                        ${generateFormField(key, schema, value)}
+                    </div>
+                `;
+            }
+            return html;
+        }
+
+        // Helper function to render secrets form fields
+        function renderSecretsForm(secretsSchema) {
+            let html = '';
+            for (const [key, schema] of Object.entries(secretsSchema)) {
+                const required = schema.required ? ' *' : '';
+                html += `
+                    <div style="margin-bottom: 1rem;">
+                        <label style="display: block; color: #cbd5e1; margin-bottom: 0.25rem; font-size: 14px;">
+                            ${key}${required}
+                        </label>
+                        <div style="color: #94a3b8; font-size: 12px; margin-bottom: 0.5rem;">${schema.description || ''}</div>
+                        <input type="password" data-secret-key="${key}" placeholder="Enter secret value (leave empty to keep current)" style="width: 100%; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; padding: 0.5rem; font-size: 14px;" />
+                    </div>
+                `;
+            }
+            return html;
+        }
+
         async function showToolConfigModal(toolName) {
             try {
                 // Fetch metadata and current config in parallel
@@ -1436,14 +1474,27 @@
                     formHtml += '<p style="color: #94a3b8;">This tool has no configurable options.</p>';
                 }
 
-                formHtml += `
-                    <div style="margin-top: 2rem; display: flex; gap: 1rem;">
-                        <button onclick="saveToolConfig('${toolName}')" class="btn" style="background: #10b981;">Save Configuration</button>
-                        <button onclick="closeModal()" class="btn" style="background: #6b7280;">Cancel</button>
+                // Show modal
+                const modal = document.createElement('div');
+                modal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); display: flex; align-items: center; justify-content: center; z-index: 1000;';
+                modal.innerHTML = `
+                    <div style="background: #1e293b; padding: 2rem; border-radius: 12px; max-width: 700px; width: 90%; max-height: 80vh; overflow: auto;">
+                        <h2 style="margin-top: 0; color: #f1f5f9;">Configure: ${toolName}</h2>
+                        <form id="tool-config-form">
+                            ${formHtml}
+                        </form>
+                        <div style="margin-top: 1.5rem; display: flex; gap: 0.5rem; justify-content: flex-end; border-top: 1px solid #334155; padding-top: 1rem;">
+                            <button type="button" onclick="this.closest('div').parentElement.remove()" class="btn" style="background: #64748b;">Cancel</button>
+                            <button type="button" onclick="saveToolConfig('${toolName}')" class="btn" style="background: #10b981;">Save</button>
+                        </div>
                     </div>
                 `;
+                document.body.appendChild(modal);
 
-                showModal(formHtml);
+                // Close on background click
+                modal.addEventListener('click', (e) => {
+                    if (e.target === modal) modal.remove();
+                });
             } catch (err) {
                 console.error('Error loading tool config:', err);
                 alert('Failed to load tool configuration');
@@ -1521,7 +1572,11 @@
                 }
 
                 alert(`✓ Configuration and ${secretPromises.length} secret(s) for "${toolName}" saved successfully!`);
-                closeModal();
+
+                // Close the modal
+                const modal = document.querySelector('div[style*="position: fixed"]');
+                if (modal) modal.remove();
+
                 loadInstalledTools();
             } catch (err) {
                 console.error('Error saving tool config:', err);
