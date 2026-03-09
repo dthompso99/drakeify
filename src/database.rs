@@ -978,7 +978,7 @@ pub struct Document {
 }
 
 /// LLM configuration record from database
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize, serde::Deserialize)]
 pub struct LlmConfigRecord {
     pub id: String,
     pub name: String,

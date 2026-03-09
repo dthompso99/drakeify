@@ -1,0 +1,46 @@
+# Build stage
+FROM rust:1.93-slim-bullseye AS builder
+WORKDIR /usr/src/drakeify
+
+# Install build dependencies for musl static linking
+RUN apt-get update && apt-get install -y pkg-config libc6-dev musl-dev musl-tools build-essential && rm -rf /var/lib/apt/lists/*
+
+# Copy manifests
+COPY Cargo.toml ./
+
+# Add musl target
+RUN rustup target add x86_64-unknown-linux-musl
+
+# Copy source code
+COPY ./src ./src
+COPY ./static ./static
+COPY ./migrations ./migrations
+
+# Build the drakeify-web binary with musl for static linking
+RUN cargo build --release --target x86_64-unknown-linux-musl --bin drakeify-web
+
+# Certificate stage
+FROM debian:bullseye-slim AS certs
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+
+# Runtime stage - using scratch for minimal image
+FROM scratch AS runtime
+
+WORKDIR /
+
+# Copy the statically-linked binary
+COPY --from=builder /usr/src/drakeify/target/x86_64-unknown-linux-musl/release/drakeify-web /drakeify-web
+
+# Copy CA certificates for HTTPS
+COPY --from=certs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+
+# Copy static files
+COPY --from=builder /usr/src/drakeify/static /static
+
+# Expose port
+EXPOSE 3974
+
+# Run the web UI
+CMD ["/drakeify-web"]
+

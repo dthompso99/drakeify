@@ -4,6 +4,8 @@ on:
   push:
     paths:
       - 'src/**'
+      - 'static/**'
+      - 'Dockerfile*'
   workflow_dispatch:
 
 jobs:
@@ -12,10 +14,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v3
-      - name: Build and push Drakeify image
+
+      - name: Login to Registry
         env:
           REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
           REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          REGISTRY_HOST: gitea.hallrd.click
+        run: |
+          echo "$REGISTRY_PASSWORD" | docker login $REGISTRY_HOST -u "$REGISTRY_USERNAME" --password-stdin
+
+      - name: Build and push Drakeify Proxy image
+        env:
           REGISTRY_HOST: gitea.hallrd.click
           NAMESPACE: dthompson
           IMAGE_AGENT: drakeify
@@ -30,6 +39,19 @@ jobs:
             --build-arg PROXY_PORT=8080 \
             --build-arg PROXY_HOST=0.0.0.0 \
             -f Dockerfile .
-          echo "$REGISTRY_PASSWORD" | docker login $REGISTRY_HOST -u "$REGISTRY_USERNAME" --password-stdin
           docker push $REGISTRY_HOST/$NAMESPACE/$IMAGE_AGENT:latest
           docker push $REGISTRY_HOST/$NAMESPACE/$IMAGE_AGENT:${{ github.sha }}
+
+      - name: Build and push Drakeify Web UI image
+        env:
+          REGISTRY_HOST: gitea.hallrd.click
+          NAMESPACE: dthompson
+          IMAGE_WEB: drakeify-web
+        run: |
+          set -euo pipefail
+          docker build --no-cache --pull \
+            -t $REGISTRY_HOST/$NAMESPACE/$IMAGE_WEB:latest \
+            -t $REGISTRY_HOST/$NAMESPACE/$IMAGE_WEB:${{ github.sha }} \
+            -f Dockerfile.web .
+          docker push $REGISTRY_HOST/$NAMESPACE/$IMAGE_WEB:latest
+          docker push $REGISTRY_HOST/$NAMESPACE/$IMAGE_WEB:${{ github.sha }}

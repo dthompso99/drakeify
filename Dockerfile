@@ -9,6 +9,7 @@ RUN rustup target add x86_64-unknown-linux-musl
 
 COPY ./src ./src
 COPY ./migrations ./migrations
+COPY ./static ./static
 
 RUN cargo build --release --target x86_64-unknown-linux-musl
 
