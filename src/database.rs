@@ -682,7 +682,7 @@ impl Database {
             Database::Sqlite(pool) => {
                 let configs = sqlx::query_as::<_, LlmConfigRecord>(
                     "SELECT id, name, host, endpoint, model, context_size, timeout_secs,
-                            capabilities, priority, enabled, metadata, created_at, updated_at
+                            capabilities, priority, enabled, metadata, account_id, created_at, updated_at
                      FROM llm_configs
                      ORDER BY priority DESC, name"
                 )
@@ -693,7 +693,7 @@ impl Database {
             Database::Postgres(pool) => {
                 let configs = sqlx::query_as::<_, LlmConfigRecord>(
                     "SELECT id, name, host, endpoint, model, context_size, timeout_secs,
-                            capabilities, priority, enabled, metadata, created_at, updated_at
+                            capabilities, priority, enabled, metadata, account_id, created_at, updated_at
                      FROM llm_configs
                      ORDER BY priority DESC, name"
                 )
@@ -712,7 +712,7 @@ impl Database {
             Database::Sqlite(pool) => {
                 let config = sqlx::query_as::<_, LlmConfigRecord>(
                     "SELECT id, name, host, endpoint, model, context_size, timeout_secs,
-                            capabilities, priority, enabled, metadata, created_at, updated_at
+                            capabilities, priority, enabled, metadata, account_id, created_at, updated_at
                      FROM llm_configs
                      WHERE id = ?"
                 )
@@ -724,7 +724,7 @@ impl Database {
             Database::Postgres(pool) => {
                 let config = sqlx::query_as::<_, LlmConfigRecord>(
                     "SELECT id, name, host, endpoint, model, context_size, timeout_secs,
-                            capabilities, priority, enabled, metadata, created_at, updated_at
+                            capabilities, priority, enabled, metadata, account_id, created_at, updated_at
                      FROM llm_configs
                      WHERE id = $1"
                 )
