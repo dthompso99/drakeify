@@ -264,15 +264,25 @@ impl RegistryClient {
         }
 
         // Extract the tarball from the first layer
-        let tarball_data = &image_data.layers[0].data;
-        let decoder = GzDecoder::new(&tarball_data[..]);
-        let mut archive = tar::Archive::new(decoder);
-
-        // Extract to install directory
+        // Clone the data so we can move it into the blocking task
+        let tarball_data = image_data.layers[0].data.clone();
         let package_dir = install_dir.join(name);
-        fs::create_dir_all(&package_dir)?;
+        let package_dir_clone = package_dir.clone();
 
-        archive.unpack(&package_dir)?;
+        // Run the blocking I/O operations in a separate thread to avoid blocking the async runtime
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let decoder = GzDecoder::new(&tarball_data[..]);
+            let mut archive = tar::Archive::new(decoder);
+
+            // Extract to install directory
+            fs::create_dir_all(&package_dir_clone)?;
+            archive.unpack(&package_dir_clone)?;
+
+            Ok(())
+        })
+        .await
+        .context("Failed to spawn blocking task")?
+        .context("Failed to extract package")?;
 
         // Read and return metadata
         let metadata_path = package_dir.join("metadata.json");

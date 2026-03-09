@@ -534,11 +534,20 @@
             })
             .catch(err => {
                 console.error('Load configs error:', err);
-                localStorage.removeItem('drakeify_token');
-                authToken = null;
-                document.getElementById('config-list').innerHTML =
-                    '<div class="error">Authentication failed. Please enter your token again.</div>';
-                showLoginForm();
+                const configList = document.getElementById('config-list');
+                if (configList) {
+                    // Only clear auth token if this is actually an authentication error
+                    if (err.message === 'Authentication failed') {
+                        localStorage.removeItem('drakeify_token');
+                        authToken = null;
+                        configList.innerHTML =
+                            '<div class="error">Authentication failed. Please enter your token again.</div>';
+                        showLoginForm();
+                    } else {
+                        configList.innerHTML =
+                            '<div class="error">Failed to load configurations. Please try again.</div>';
+                    }
+                }
             });
         }
 
@@ -1728,8 +1737,38 @@
             ws.onmessage = (event) => {
                 const update = JSON.parse(event.data);
                 console.log('WebSocket update:', update);
-                // Refresh the config list on any update
-                loadConfigs();
+
+                // Refresh the appropriate list based on update type
+                switch (update.type) {
+                    case 'LlmConfigCreated':
+                    case 'LlmConfigUpdated':
+                    case 'LlmConfigDeleted':
+                        // Only reload configs if we're on the LLM config page
+                        if (document.getElementById('config-list')) {
+                            loadConfigs();
+                        }
+                        break;
+                    case 'PluginInstalled':
+                    case 'PluginUninstalled':
+                        // Reload plugin lists if they exist
+                        if (typeof loadInstalledPlugins === 'function') {
+                            loadInstalledPlugins();
+                        }
+                        if (typeof loadAvailablePlugins === 'function') {
+                            loadAvailablePlugins();
+                        }
+                        break;
+                    case 'ToolInstalled':
+                    case 'ToolUninstalled':
+                        // Reload tool lists if they exist
+                        if (typeof loadInstalledTools === 'function') {
+                            loadInstalledTools();
+                        }
+                        if (typeof loadAvailableTools === 'function') {
+                            loadAvailableTools();
+                        }
+                        break;
+                }
             };
         }
 
