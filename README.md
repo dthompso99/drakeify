@@ -23,3 +23,5 @@ Key features:
 for plugin development, see [PLUGINS.md](PLUGINS.md).
 
 for tool development, see [TOOLS.md](TOOLS.md).
+
+for implementation details, see [IMPLEMENTATION.md](IMPLEMENTATION.md).

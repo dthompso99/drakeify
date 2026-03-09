@@ -5,27 +5,20 @@ The following is just a checklist of future plans, not in any particular order. 
    - allow tools to run on remote systems, and register themselves with drakeify
  - Micro LLM support
    - embed a small LLM to handle simple tasks, and expose it to the plugin ecosystem.
- - Cron Support
-   - allow plugins to schedule tasks to be run at a later time
- - Better Session Managment
-   - allow sessions to be resumed, and for data to be persisted between runs
-   - not to be confused with memory
  - Better Identity Management 
    - allow for multiple identities to be used at once, and for them to be able to call each other
  - Multi-LLM support
    - allow for multiple LLMs to be used at once, and for them to be able to call each other
    - seperate LLMs for images, audio, and text
- - Support for openai style api keys
-   - use api keys to tie together identities
-   - use api keys to track usage
-   - use api keys to enforce rate limits
-   - use api keys to enforce concurrency limits
-   - possible billing support for commercial applications
  - expand testing
    - test with existing agents such as claude code, zed, etc.
    - create a test suite against multiple LLMs to ensure compatibility
  - fine grained permissions
    - while drakeify does not enable any dangerous tools by itself, pluging and tools can.
- - explore the concept of "channels": 
-   - slack, discord, text.... IE: how the llm can reach out if needed
-   - the existing plugin/tool system MAY be sufficient, research is needed
+ - plugin/tool readyness gates
+   - check if a plugin/tool requires secrets, config, etc, and if not disable it until those are.
+ - a UI
+ - a setup wizzard, and quickstart mode.
+ - tool_search support:  I think this can be done all via plugins
+ - sandbox support: Allow the LLM to run many tool calls via a sandboxed environment.  The tools would need to be specially designed to work in this way.  The LLM would be able to run code, but only in a sandboxed environment.
+ - cross-tool calling:  allow tools to call other tools.  This would allow simple tools to be combined into more complex tools.  also a stepping stone for sandboxs.

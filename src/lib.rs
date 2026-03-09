@@ -9,6 +9,7 @@ pub mod proxy;
 pub mod registry;
 pub mod database;
 pub mod scheduler;
+pub mod llm_config_manager;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -23,6 +24,7 @@ pub use session::SessionManager;
 pub use registry::{RegistryClient, PackageMetadata, PackageType};
 pub use database::Database;
 pub use scheduler::{SchedulerConfig, start_scheduler};
+pub use llm_config_manager::{LlmConfigManager, SelectionContext};
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone)]
 pub struct DrakeifyConfig {

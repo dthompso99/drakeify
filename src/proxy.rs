@@ -17,6 +17,7 @@ use crate::llm::{OllamaMessage, OllamaToolCall, LlmConfig};
 use crate::js_runtime::JsRuntimeConfig;
 use crate::database::Database;
 use crate::StreamMessage;
+use crate::llm_config_manager::LlmConfigManager;
 
 /// Extract account_id from Authorization header
 /// Format: "Authorization: Bearer <api_key>"
@@ -280,6 +281,7 @@ pub struct ProxyState {
     pub enabled_plugins: Option<Vec<String>>,
     pub disabled_plugins: Option<Vec<String>>,
     pub database: Arc<Database>,
+    pub llm_config_manager: Arc<LlmConfigManager>,
 }
 
 /// Convert Anthropic Messages format to OpenAI Chat Completions format
@@ -377,7 +379,13 @@ pub async fn start_proxy_server(
         host: llm_host,
         endpoint: llm_endpoint,
         timeout_secs: 900,
+        account_id: None,  // No account_id from env vars (use database configs for commercial LLMs)
     };
+
+    // Initialize LlmConfigManager with env fallback
+    let llm_config_manager = Arc::new(
+        LlmConfigManager::new(database.clone(), Some(llm_config.clone())).await?
+    );
 
     let state = Arc::new(ProxyState {
         llm_config,
@@ -390,6 +398,7 @@ pub async fn start_proxy_server(
         enabled_plugins,
         disabled_plugins,
         database: Arc::new(database),
+        llm_config_manager,
     });
 
     // Configure CORS to allow all origins (for development/testing)
@@ -480,11 +489,26 @@ fn execute_tool_loop_streaming(
     client_tools: &[ToolDefinition],
     tx: &tokio::sync::mpsc::UnboundedSender<StreamMessage>,
 ) -> Result<ToolLoopResult> {
-    use crate::{ConversationLoopConfig, StreamingMode, execute_unified_conversation_loop};
+    use crate::{ConversationLoopConfig, StreamingMode, execute_unified_conversation_loop, SelectionContext};
+
+    // Select the appropriate LLM config using the manager
+    // Build selection context from the conversation
+    let selection_context = SelectionContext {
+        account_id: "anonymous".to_string(), // TODO: Pass account_id from caller
+        session_id: None,
+        required_capabilities: vec![],
+        preferred_id: None,
+        metadata: std::collections::HashMap::new(),
+    };
+
+    // Select LLM config (this needs to be async, so we use block_on)
+    let selected_config = tokio::runtime::Handle::current().block_on(
+        state.llm_config_manager.select(selection_context)
+    )?;
 
     // Configure the unified loop for proxy mode
     let loop_config = ConversationLoopConfig {
-        llm_config: &state.llm_config,
+        llm_config: &selected_config,
         llm_model: state.llm_model.clone(),
         context_size: state.context_size,
         tool_registry,
@@ -582,6 +606,7 @@ async fn handle_streaming_request(
                 Some(account_id_clone.clone()),
                 Some(state_clone.llm_config.clone()),
                 Some(state_clone.llm_model.clone()),
+                Some(state_clone.llm_config_manager.clone()),
             ) {
                 Ok(r) => r,
                 Err(e) => {
@@ -856,18 +881,55 @@ async fn models_handler(
 ) -> Response {
     info!("📋 Received models list request");
 
-    let model_info = ModelInfo {
-        id: state.llm_model.clone(),
-        object: "model".to_string(),
-        created: 1677649963, // Static timestamp
-        owned_by: "drakeify".to_string(),
+    // Get all configured LLMs from the manager
+    let configs = match state.llm_config_manager.list_configs().await {
+        Ok(configs) => configs,
+        Err(e) => {
+            error!("Failed to list LLM configs: {}", e);
+            // Fallback to env config
+            let model_info = ModelInfo {
+                id: state.llm_model.clone(),
+                object: "model".to_string(),
+                created: 1677649963,
+                owned_by: "drakeify".to_string(),
+            };
+            let response = ModelsResponse {
+                object: "list".to_string(),
+                data: vec![model_info],
+            };
+            return (StatusCode::OK, Json(response)).into_response();
+        }
+    };
+
+    // Convert LLM configs to model info
+    let models: Vec<ModelInfo> = configs.iter()
+        .filter(|c| c.enabled)
+        .map(|c| ModelInfo {
+            id: c.model.clone(),
+            object: "model".to_string(),
+            created: 1677649963, // Static timestamp
+            owned_by: "drakeify".to_string(),
+        })
+        .collect();
+
+    // If no models found, fallback to env config
+    let models = if models.is_empty() {
+        vec![ModelInfo {
+            id: state.llm_model.clone(),
+            object: "model".to_string(),
+            created: 1677649963,
+            owned_by: "drakeify".to_string(),
+        }]
+    } else {
+        models
     };
 
     let response = ModelsResponse {
         object: "list".to_string(),
-        data: vec![model_info],
+        data: models,
     };
 
+    info!("📋 Returning {} models", response.data.len());
     (StatusCode::OK, Json(response)).into_response()
 }
 
@@ -896,6 +958,7 @@ async fn webhook_handler(
             Some(webhook_account_id),
             Some(state_clone.llm_config.clone()),
             Some(state_clone.llm_model.clone()),
+            Some(state_clone.llm_config_manager.clone()),
         )?;
 
         // Load plugins
@@ -1027,6 +1090,7 @@ async fn chat_completions_handler(
             Some(account_id_clone.clone()),
             Some(state_clone.llm_config.clone()),
             Some(state_clone.llm_model.clone()),
+            Some(state_clone.llm_config_manager.clone()),
         )?;
 
         // Load plugins

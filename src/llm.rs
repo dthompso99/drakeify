@@ -197,6 +197,7 @@ pub struct LlmConfig {
     pub host: String,
     pub endpoint: String,
     pub timeout_secs: u64,
+    pub account_id: Option<String>,  // API key/account ID for the LLM provider
 }
 
 impl Default for LlmConfig {
@@ -205,6 +206,7 @@ impl Default for LlmConfig {
             host: "http://localhost:11434".to_string(),
             endpoint: "/api/chat".to_string(),
             timeout_secs: 900,
+            account_id: None,
         }
     }
 }
@@ -246,7 +248,15 @@ pub async fn execute_request(
         }
     }
 
-    let response = client.post(url).json(&request).send().await?;
+    // Build the request with optional authentication
+    let mut request_builder = client.post(url).json(&request);
+
+    // Add Authorization header if account_id (API key) is provided
+    if let Some(ref api_key) = config.account_id {
+        request_builder = request_builder.header("Authorization", format!("Bearer {}", api_key));
+    }
+
+    let response = request_builder.send().await?;
     let byte_stream = response.bytes_stream().map(|result| {
         result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
     });

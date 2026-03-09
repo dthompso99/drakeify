@@ -20,7 +20,7 @@ function pre_request(data) {
     
     if (systemMessageIndex !== -1) {
         const currentPrompt = data.messages[systemMessageIndex].content;
-        
+        console.log("currentPrompt:", currentPrompt);
         // Add additional instructions to the system prompt
         const enhancements = [
             "\n\n## Additional Guidelines:",

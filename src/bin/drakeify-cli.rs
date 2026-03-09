@@ -698,6 +698,64 @@ async fn handle_slash_command(input: &str, config: &DrakeifyConfig) -> Result<bo
             }
             Ok(true)
         }
+        "/llm" | "/llms" => {
+            if parts.len() < 2 {
+                println!("Usage: /llm <list|get|set|delete|default> [args...]");
+                println!("  /llm list                      - List all LLM configurations");
+                println!("  /llm get <id>                  - Get a specific LLM config");
+                println!("  /llm set <id> <json>           - Create/update an LLM config");
+                println!("  /llm delete <id>               - Delete an LLM config");
+                println!("  /llm default [id]              - Get or set the default LLM");
+                return Ok(true);
+            }
+
+            // Initialize database for LLM config operations
+            let db = Database::connect(&config.database_url).await?;
+            db.migrate().await?;
+
+            match parts[1] {
+                "list" | "ls" => {
+                    handle_list_llm_configs(&db).await?;
+                }
+                "get" => {
+                    if parts.len() < 3 {
+                        println!("Usage: /llm get <id>");
+                        return Ok(true);
+                    }
+                    handle_get_llm_config(&db, parts[2].to_string()).await?;
+                }
+                "set" => {
+                    if parts.len() < 4 {
+                        println!("Usage: /llm set <id> <json>");
+                        return Ok(true);
+                    }
+                    // Join remaining parts as the JSON value (in case it has spaces)
+                    let json_value = parts[3..].join(" ");
+                    handle_set_llm_config(&db, parts[2].to_string(), json_value).await?;
+                }
+                "delete" | "del" | "rm" => {
+                    if parts.len() < 3 {
+                        println!("Usage: /llm delete <id>");
+                        return Ok(true);
+                    }
+                    handle_delete_llm_config(&db, parts[2].to_string()).await?;
+                }
+                "default" => {
+                    if parts.len() < 3 {
+                        // Get current default
+                        handle_get_default_llm(&db).await?;
+                    } else {
+                        // Set new default
+                        handle_set_default_llm(&db, parts[2].to_string()).await?;
+                    }
+                }
+                _ => {
+                    println!("Unknown llm command: {}", parts[1]);
+                    println!("Available commands: list, get, set, delete, default");
+                }
+            }
+            Ok(true)
+        }
         "/help" => {
             println!("\nAvailable slash commands:");
             println!("  /packages ls <plugin|tool>                                    - List installed packages");
@@ -712,6 +770,11 @@ async fn handle_slash_command(input: &str, config: &DrakeifyConfig) -> Result<bo
             println!("  /config get <scope>                                           - Get config for a scope");
             println!("  /config set <scope> <json>                                    - Set config (JSON value)");
             println!("  /config delete <scope>                                        - Delete a config");
+            println!("  /llm list                                                     - List all LLM configurations");
+            println!("  /llm get <id>                                                 - Get a specific LLM config");
+            println!("  /llm set <id> <json>                                          - Create/update an LLM config");
+            println!("  /llm delete <id>                                              - Delete an LLM config");
+            println!("  /llm default [id]                                             - Get or set the default LLM");
             println!("  /help                                                         - Show this help");
             println!("\nSlash commands are executed locally and do not go to the LLM.\n");
             Ok(true)
@@ -1207,6 +1270,222 @@ async fn handle_list_configs(db: &Database) -> Result<()> {
     }
 
     println!();
+    Ok(())
+}
+
+// ========================================
+// LLM Configuration Handlers
+// ========================================
+
+/// Handle the list-llm-configs command
+async fn handle_list_llm_configs(db: &Database) -> Result<()> {
+    info!("Listing all LLM configurations");
+
+    let configs = db.list_llm_configs().await?;
+
+    if configs.is_empty() {
+        println!("No LLM configurations found");
+        println!("\nTip: Create one with: /llm set <id> <json>");
+        return Ok(());
+    }
+
+    println!("\n🤖 LLM Configurations:");
+    println!("{:<20} {:<30} {:<40} {:<15} {:<10}", "ID", "Name", "Model", "Priority", "Enabled");
+    println!("{}", "-".repeat(115));
+
+    for config in configs {
+        let enabled_icon = if config.enabled { "✅" } else { "❌" };
+        println!(
+            "{:<20} {:<30} {:<40} {:<15} {:<10}",
+            config.id,
+            config.name,
+            config.model,
+            config.priority,
+            enabled_icon
+        );
+    }
+
+    println!();
+    Ok(())
+}
+
+/// Handle the get-llm-config command
+async fn handle_get_llm_config(db: &Database, id: String) -> Result<()> {
+    info!("Getting LLM configuration: {}", id);
+
+    match db.get_llm_config(&id).await? {
+        Some(config) => {
+            println!("\n🤖 LLM Configuration '{}':", id);
+            println!("  Name:         {}", config.name);
+            println!("  Host:         {}", config.host);
+            println!("  Endpoint:     {}", config.endpoint);
+            println!("  Model:        {}", config.model);
+            println!("  Context Size: {}", config.context_size);
+            println!("  Timeout:      {}s", config.timeout_secs);
+            println!("  Priority:     {}", config.priority);
+            println!("  Enabled:      {}", if config.enabled { "✅ Yes" } else { "❌ No" });
+
+            // Parse and display capabilities
+            if let Ok(caps) = config.get_capabilities() {
+                println!("  Capabilities: {}", caps.join(", "));
+            }
+
+            // Parse and display metadata
+            if let Ok(metadata) = config.get_metadata() {
+                if metadata.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
+                    println!("  Metadata:");
+                    let json = serde_json::to_string_pretty(&metadata)?;
+                    for line in json.lines() {
+                        println!("    {}", line);
+                    }
+                }
+            }
+
+            println!();
+        }
+        None => {
+            println!("❌ No LLM configuration found with id: {}", id);
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle the set-llm-config command
+async fn handle_set_llm_config(db: &Database, id: String, json_value: String) -> Result<()> {
+    info!("Setting LLM configuration: {}", id);
+
+    // Parse the JSON value
+    let value: serde_json::Value = serde_json::from_str(&json_value)
+        .context("LLM config value must be valid JSON")?;
+
+    // Extract fields from JSON
+    let name = value.get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&id)
+        .to_string();
+
+    let host = value.get("host")
+        .and_then(|v| v.as_str())
+        .context("Missing required field: host")?
+        .to_string();
+
+    let endpoint = value.get("endpoint")
+        .and_then(|v| v.as_str())
+        .unwrap_or("/api/chat")
+        .to_string();
+
+    let model = value.get("model")
+        .and_then(|v| v.as_str())
+        .context("Missing required field: model")?
+        .to_string();
+
+    let context_size = value.get("context_size")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(32768) as i32;
+
+    let timeout_secs = value.get("timeout_secs")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(900) as i32;
+
+    let capabilities = value.get("capabilities")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "[]".to_string());
+
+    let priority = value.get("priority")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0) as i32;
+
+    let enabled = value.get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let metadata = value.get("metadata")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "{}".to_string());
+
+    // Extract optional account_id (API key for the LLM provider)
+    let account_id = value.get("account_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    // Create the config record
+    let config = drakeify::database::LlmConfigRecord {
+        id: id.clone(),
+        name,
+        host,
+        endpoint,
+        model,
+        context_size,
+        timeout_secs,
+        capabilities,
+        priority,
+        enabled,
+        metadata,
+        account_id,
+        created_at: String::new(), // Will be set by database
+        updated_at: String::new(), // Will be set by database
+    };
+
+    db.upsert_llm_config(&config).await?;
+    println!("✅ LLM configuration '{}' has been saved", id);
+    Ok(())
+}
+
+/// Handle the delete-llm-config command
+async fn handle_delete_llm_config(db: &Database, id: String) -> Result<()> {
+    info!("Deleting LLM configuration: {}", id);
+
+    let deleted = db.delete_llm_config(&id).await?;
+
+    if deleted {
+        println!("✅ LLM configuration '{}' has been deleted", id);
+    } else {
+        println!("❌ No LLM configuration found with id: {}", id);
+    }
+
+    Ok(())
+}
+
+/// Handle the get-default-llm command
+async fn handle_get_default_llm(db: &Database) -> Result<()> {
+    info!("Getting default LLM configuration");
+
+    match db.get_global_config("default_llm_id").await? {
+        Some(llm_id) => {
+            println!("🤖 Default LLM: {}", llm_id);
+
+            // Also show the config details
+            if let Some(config) = db.get_llm_config(&llm_id).await? {
+                println!("  Name:  {}", config.name);
+                println!("  Model: {}", config.model);
+            }
+        }
+        None => {
+            println!("No default LLM configured");
+            println!("\nTip: Set one with: /llm default <id>");
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle the set-default-llm command
+async fn handle_set_default_llm(db: &Database, id: String) -> Result<()> {
+    info!("Setting default LLM to: {}", id);
+
+    // Verify the LLM config exists
+    match db.get_llm_config(&id).await? {
+        Some(_) => {
+            db.set_global_config("default_llm_id", &id, Some("Default LLM configuration ID")).await?;
+            println!("✅ Default LLM set to: {}", id);
+        }
+        None => {
+            println!("❌ No LLM configuration found with id: {}", id);
+            println!("\nTip: List available LLMs with: /llm list");
+        }
+    }
+
     Ok(())
 }
 

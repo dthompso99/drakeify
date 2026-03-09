@@ -62,6 +62,7 @@ pub struct PluginRegistry {
     account_id: Rc<RefCell<String>>,
     llm_config: Option<LlmConfig>,
     llm_model: Option<String>,
+    llm_config_manager: Option<std::sync::Arc<crate::llm_config_manager::LlmConfigManager>>,
 }
 
 impl PluginRegistry {
@@ -73,6 +74,7 @@ impl PluginRegistry {
         account_id: Option<String>,
         llm_config: Option<LlmConfig>,
         llm_model: Option<String>,
+        llm_config_manager: Option<std::sync::Arc<crate::llm_config_manager::LlmConfigManager>>,
     ) -> Result<Self> {
         let runtime = Runtime::new()?;
 
@@ -90,6 +92,7 @@ impl PluginRegistry {
             account_id: Rc::new(RefCell::new(account_id.unwrap_or_else(|| "anonymous".to_string()))),
             llm_config,
             llm_model,
+            llm_config_manager,
         })
     }
 
@@ -848,6 +851,111 @@ impl PluginRegistry {
 
                 Ok::<(), anyhow::Error>(())
             })?;
+
+            // LLM Config Manager bridge functions
+            ctx.with(|ctx| {
+                let database_clone7 = db.clone();
+
+                // __rust_llm_list() -> JSON array of LLM configs
+                let llm_list_fn = Function::new(ctx.clone(), move || -> String {
+                    let db_clone = database_clone7.clone();
+
+                    if let Some(h) = tokio::runtime::Handle::try_current().ok() {
+                        tokio::task::block_in_place(|| {
+                            h.block_on(async move {
+                                match db_clone.list_llm_configs().await {
+                                    Ok(configs) => {
+                                        // Convert to JSON array
+                                        let configs_json: Vec<serde_json::Value> = configs.iter().map(|c| {
+                                            serde_json::json!({
+                                                "id": c.id,
+                                                "name": c.name,
+                                                "host": c.host,
+                                                "endpoint": c.endpoint,
+                                                "model": c.model,
+                                                "context_size": c.context_size,
+                                                "timeout_secs": c.timeout_secs,
+                                                "capabilities": c.get_capabilities().unwrap_or_default(),
+                                                "priority": c.priority,
+                                                "enabled": c.enabled,
+                                                "metadata": c.get_metadata().unwrap_or(serde_json::json!({})),
+                                                "account_id": c.account_id
+                                            })
+                                        }).collect();
+
+                                        serde_json::to_string(&configs_json).unwrap_or_else(|_| "[]".to_string())
+                                    }
+                                    Err(e) => {
+                                        serde_json::json!({
+                                            "__error": format!("Failed to list LLM configs: {}", e)
+                                        }).to_string()
+                                    }
+                                }
+                            })
+                        })
+                    } else {
+                        serde_json::json!({
+                            "__error": "No tokio runtime available"
+                        }).to_string()
+                    }
+                })?;
+                ctx.globals().set("__rust_llm_list", llm_list_fn)?;
+
+                let database_clone8 = db.clone();
+
+                // __rust_llm_get(id) -> JSON object or null
+                let llm_get_fn = Function::new(ctx.clone(), move |id: String| -> String {
+                    let db_clone = database_clone8.clone();
+
+                    if let Some(h) = tokio::runtime::Handle::try_current().ok() {
+                        tokio::task::block_in_place(|| {
+                            h.block_on(async move {
+                                match db_clone.get_llm_config(&id).await {
+                                    Ok(Some(c)) => {
+                                        serde_json::json!({
+                                            "id": c.id,
+                                            "name": c.name,
+                                            "host": c.host,
+                                            "endpoint": c.endpoint,
+                                            "model": c.model,
+                                            "context_size": c.context_size,
+                                            "timeout_secs": c.timeout_secs,
+                                            "capabilities": c.get_capabilities().unwrap_or_default(),
+                                            "priority": c.priority,
+                                            "enabled": c.enabled,
+                                            "metadata": c.get_metadata().unwrap_or(serde_json::json!({})),
+                                            "account_id": c.account_id
+                                        }).to_string()
+                                    }
+                                    Ok(None) => "null".to_string(),
+                                    Err(e) => {
+                                        serde_json::json!({
+                                            "__error": format!("Failed to get LLM config: {}", e)
+                                        }).to_string()
+                                    }
+                                }
+                            })
+                        })
+                    } else {
+                        serde_json::json!({
+                            "__error": "No tokio runtime available"
+                        }).to_string()
+                    }
+                })?;
+                ctx.globals().set("__rust_llm_get", llm_get_fn)?;
+
+                // __rust_llm_register_selector(priority, selectorId) -> void
+                // Note: For now, we just log the registration. The actual hook calling will be
+                // implemented when we have a way to safely call JS functions from async contexts.
+                // This is a limitation of the current architecture where JS runtime is not Send/Sync.
+                let llm_register_selector_fn = Function::new(ctx.clone(), move |priority: i32, selector_id: String| -> String {
+                    info!("✓ Registered LLM selector '{}' with priority {} (JS hook calling not yet implemented)", selector_id, priority);
+                    serde_json::json!({ "success": true }).to_string()
+                })?;
+                ctx.globals().set("__rust_llm_register_selector", llm_register_selector_fn)?;
+
+                Ok::<(), anyhow::Error>(())
+            })?;
         }
 
         // Inject call_llm function if llm_config is available
@@ -1010,7 +1118,8 @@ impl PluginRegistry {
                                     database,
                                     Some(account_id),
                                     Some(config.clone()),
-                                    Some(model.clone())
+                                    Some(model.clone()),
+                                    None,  // No LlmConfigManager in nested process_conversation
                                 ) {
                                     Ok(r) => r,
                                     Err(e) => {

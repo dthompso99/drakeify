@@ -670,6 +670,270 @@ impl Database {
         }
     }
 
+    // ========================================
+    // LLM Configuration Methods
+    // ========================================
+
+    /// List all LLM configurations
+    pub async fn list_llm_configs(&self) -> Result<Vec<LlmConfigRecord>> {
+        debug!("Listing all LLM configurations");
+
+        match self {
+            Database::Sqlite(pool) => {
+                let configs = sqlx::query_as::<_, LlmConfigRecord>(
+                    "SELECT id, name, host, endpoint, model, context_size, timeout_secs,
+                            capabilities, priority, enabled, metadata, created_at, updated_at
+                     FROM llm_configs
+                     ORDER BY priority DESC, name"
+                )
+                    .fetch_all(pool)
+                    .await?;
+                Ok(configs)
+            }
+            Database::Postgres(pool) => {
+                let configs = sqlx::query_as::<_, LlmConfigRecord>(
+                    "SELECT id, name, host, endpoint, model, context_size, timeout_secs,
+                            capabilities, priority, enabled, metadata, created_at, updated_at
+                     FROM llm_configs
+                     ORDER BY priority DESC, name"
+                )
+                    .fetch_all(pool)
+                    .await?;
+                Ok(configs)
+            }
+        }
+    }
+
+    /// Get a specific LLM configuration by ID
+    pub async fn get_llm_config(&self, id: &str) -> Result<Option<LlmConfigRecord>> {
+        debug!("Getting LLM configuration: {}", id);
+
+        match self {
+            Database::Sqlite(pool) => {
+                let config = sqlx::query_as::<_, LlmConfigRecord>(
+                    "SELECT id, name, host, endpoint, model, context_size, timeout_secs,
+                            capabilities, priority, enabled, metadata, created_at, updated_at
+                     FROM llm_configs
+                     WHERE id = ?"
+                )
+                    .bind(id)
+                    .fetch_optional(pool)
+                    .await?;
+                Ok(config)
+            }
+            Database::Postgres(pool) => {
+                let config = sqlx::query_as::<_, LlmConfigRecord>(
+                    "SELECT id, name, host, endpoint, model, context_size, timeout_secs,
+                            capabilities, priority, enabled, metadata, created_at, updated_at
+                     FROM llm_configs
+                     WHERE id = $1"
+                )
+                    .bind(id)
+                    .fetch_optional(pool)
+                    .await?;
+                Ok(config)
+            }
+        }
+    }
+
+    /// Create or update an LLM configuration
+    pub async fn upsert_llm_config(&self, config: &LlmConfigRecord) -> Result<()> {
+        debug!("Upserting LLM configuration: {}", config.id);
+
+        match self {
+            Database::Sqlite(pool) => {
+                sqlx::query(
+                    "INSERT INTO llm_configs
+                        (id, name, host, endpoint, model, context_size, timeout_secs,
+                         capabilities, priority, enabled, metadata, account_id, created_at, updated_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                     ON CONFLICT(id) DO UPDATE SET
+                        name = excluded.name,
+                        host = excluded.host,
+                        endpoint = excluded.endpoint,
+                        model = excluded.model,
+                        context_size = excluded.context_size,
+                        timeout_secs = excluded.timeout_secs,
+                        capabilities = excluded.capabilities,
+                        priority = excluded.priority,
+                        enabled = excluded.enabled,
+                        metadata = excluded.metadata,
+                        account_id = excluded.account_id,
+                        updated_at = datetime('now')"
+                )
+                    .bind(&config.id)
+                    .bind(&config.name)
+                    .bind(&config.host)
+                    .bind(&config.endpoint)
+                    .bind(&config.model)
+                    .bind(config.context_size)
+                    .bind(config.timeout_secs)
+                    .bind(&config.capabilities)
+                    .bind(config.priority)
+                    .bind(config.enabled)
+                    .bind(&config.metadata)
+                    .bind(&config.account_id)
+                    .execute(pool)
+                    .await?;
+            }
+            Database::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO llm_configs
+                        (id, name, host, endpoint, model, context_size, timeout_secs,
+                         capabilities, priority, enabled, metadata, account_id)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                     ON CONFLICT(id) DO UPDATE SET
+                        name = EXCLUDED.name,
+                        host = EXCLUDED.host,
+                        endpoint = EXCLUDED.endpoint,
+                        model = EXCLUDED.model,
+                        context_size = EXCLUDED.context_size,
+                        timeout_secs = EXCLUDED.timeout_secs,
+                        capabilities = EXCLUDED.capabilities,
+                        priority = EXCLUDED.priority,
+                        enabled = EXCLUDED.enabled,
+                        metadata = EXCLUDED.metadata,
+                        account_id = EXCLUDED.account_id,
+                        updated_at = CURRENT_TIMESTAMP"
+                )
+                    .bind(&config.id)
+                    .bind(&config.name)
+                    .bind(&config.host)
+                    .bind(&config.endpoint)
+                    .bind(&config.model)
+                    .bind(config.context_size)
+                    .bind(config.timeout_secs)
+                    .bind(&config.capabilities)
+                    .bind(config.priority)
+                    .bind(config.enabled)
+                    .bind(&config.metadata)
+                    .bind(&config.account_id)
+                    .execute(pool)
+                    .await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Delete an LLM configuration
+    pub async fn delete_llm_config(&self, id: &str) -> Result<bool> {
+        debug!("Deleting LLM configuration: {}", id);
+
+        let rows_affected = match self {
+            Database::Sqlite(pool) => {
+                sqlx::query("DELETE FROM llm_configs WHERE id = ?")
+                    .bind(id)
+                    .execute(pool)
+                    .await?
+                    .rows_affected()
+            }
+            Database::Postgres(pool) => {
+                sqlx::query("DELETE FROM llm_configs WHERE id = $1")
+                    .bind(id)
+                    .execute(pool)
+                    .await?
+                    .rows_affected()
+            }
+        };
+
+        Ok(rows_affected > 0)
+    }
+
+    // ========================================
+    // Global Configuration Methods
+    // ========================================
+
+    /// Get a global configuration value
+    pub async fn get_global_config(&self, key: &str) -> Result<Option<String>> {
+        debug!("Getting global config: {}", key);
+
+        match self {
+            Database::Sqlite(pool) => {
+                let value = sqlx::query_scalar::<_, String>(
+                    "SELECT value FROM global_config WHERE key = ?"
+                )
+                    .bind(key)
+                    .fetch_optional(pool)
+                    .await?;
+                Ok(value)
+            }
+            Database::Postgres(pool) => {
+                let value = sqlx::query_scalar::<_, String>(
+                    "SELECT value FROM global_config WHERE key = $1"
+                )
+                    .bind(key)
+                    .fetch_optional(pool)
+                    .await?;
+                Ok(value)
+            }
+        }
+    }
+
+    /// Set a global configuration value
+    pub async fn set_global_config(&self, key: &str, value: &str, description: Option<&str>) -> Result<()> {
+        debug!("Setting global config: {} = {}", key, value);
+
+        match self {
+            Database::Sqlite(pool) => {
+                sqlx::query(
+                    "INSERT INTO global_config (key, value, description, updated_at)
+                     VALUES (?, ?, ?, datetime('now'))
+                     ON CONFLICT(key) DO UPDATE SET
+                        value = excluded.value,
+                        description = excluded.description,
+                        updated_at = datetime('now')"
+                )
+                    .bind(key)
+                    .bind(value)
+                    .bind(description)
+                    .execute(pool)
+                    .await?;
+            }
+            Database::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO global_config (key, value, description)
+                     VALUES ($1, $2, $3)
+                     ON CONFLICT(key) DO UPDATE SET
+                        value = EXCLUDED.value,
+                        description = EXCLUDED.description,
+                        updated_at = CURRENT_TIMESTAMP"
+                )
+                    .bind(key)
+                    .bind(value)
+                    .bind(description)
+                    .execute(pool)
+                    .await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Delete a global configuration value
+    pub async fn delete_global_config(&self, key: &str) -> Result<bool> {
+        debug!("Deleting global config: {}", key);
+
+        let rows_affected = match self {
+            Database::Sqlite(pool) => {
+                sqlx::query("DELETE FROM global_config WHERE key = ?")
+                    .bind(key)
+                    .execute(pool)
+                    .await?
+                    .rows_affected()
+            }
+            Database::Postgres(pool) => {
+                sqlx::query("DELETE FROM global_config WHERE key = $1")
+                    .bind(key)
+                    .execute(pool)
+                    .await?
+                    .rows_affected()
+            }
+        };
+
+        Ok(rows_affected > 0)
+    }
+
     /// Sanitize database URL for logging (hide passwords)
     fn sanitize_url(url: &str) -> String {
         if let Some(at_pos) = url.find('@') {
@@ -711,6 +975,49 @@ pub struct Document {
     pub metadata: String,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// LLM configuration record from database
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct LlmConfigRecord {
+    pub id: String,
+    pub name: String,
+    pub host: String,
+    pub endpoint: String,
+    pub model: String,
+    pub context_size: i32,
+    pub timeout_secs: i32,
+    pub capabilities: String,  // JSON array stored as string
+    pub priority: i32,
+    pub enabled: bool,
+    pub metadata: String,      // JSON object stored as string
+    pub account_id: Option<String>,  // API key/account ID for the LLM provider
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl LlmConfigRecord {
+    /// Parse capabilities from JSON string
+    pub fn get_capabilities(&self) -> Result<Vec<String>> {
+        serde_json::from_str(&self.capabilities)
+            .context("Failed to parse capabilities JSON")
+    }
+
+    /// Parse metadata from JSON string
+    pub fn get_metadata(&self) -> Result<serde_json::Value> {
+        serde_json::from_str(&self.metadata)
+            .context("Failed to parse metadata JSON")
+    }
+
+    /// Convert to LlmConfig for use in LLM calls
+    pub fn to_llm_config(&self) -> crate::llm::LlmConfig {
+        crate::llm::LlmConfig {
+            host: self.host.clone(),
+            endpoint: self.endpoint.clone(),
+            timeout_secs: self.timeout_secs as u64,
+            account_id: self.account_id.clone(),
+        }
+    }
 }
 
 

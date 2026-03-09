@@ -874,6 +874,92 @@ fn setup_http_fetch(ctx: &rquickjs::Ctx, _config: &JsRuntimeConfig) -> Result<()
                 throw new Error('Failed to process conversation: ' + String(e));
             }
         };
+
+        // ============================================================================
+        // LLM Configuration Management API
+        // ============================================================================
+
+        // Placeholder for LLM config functions - will be replaced by Rust if manager is available
+        globalThis.__rust_llm_list = function() {
+            return '[]';
+        };
+
+        globalThis.__rust_llm_get = function(id) {
+            return 'null';
+        };
+
+        globalThis.__rust_llm_register_selector = function(priority, selectorId) {
+            throw new Error('LLM config manager not available in this context');
+        };
+
+        // drakeify.llm namespace
+        globalThis.drakeify = globalThis.drakeify || {};
+        globalThis.drakeify.llm = {
+            // List all LLM configurations
+            list: function() {
+                try {
+                    var resultJson = __rust_llm_list();
+                    var result = JSON.parse(resultJson);
+
+                    // Check for error
+                    if (result && result.__error) {
+                        throw new Error(result.__error);
+                    }
+
+                    return result || [];
+                } catch (e) {
+                    throw new Error('Failed to list LLM configs: ' + String(e));
+                }
+            },
+
+            // Get a specific LLM configuration by ID
+            get: function(id) {
+                try {
+                    if (!id || typeof id !== 'string') {
+                        throw new Error('id must be a non-empty string');
+                    }
+
+                    var resultJson = __rust_llm_get(id);
+                    var result = JSON.parse(resultJson);
+
+                    // Check for error
+                    if (result && result.__error) {
+                        throw new Error(result.__error);
+                    }
+
+                    return result;
+                } catch (e) {
+                    throw new Error('Failed to get LLM config: ' + String(e));
+                }
+            },
+
+            // Register a selector function with priority
+            // The selector receives a context object and returns an LLM ID or null
+            registerSelector: function(selectorFn, priority) {
+                try {
+                    if (typeof selectorFn !== 'function') {
+                        throw new Error('selectorFn must be a function');
+                    }
+
+                    // Default priority is 0
+                    priority = typeof priority === 'number' ? priority : 0;
+
+                    // Generate a unique ID for this selector
+                    var selectorId = 'selector_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+
+                    // Store the selector function globally so Rust can call it
+                    globalThis.__llm_selectors = globalThis.__llm_selectors || {};
+                    globalThis.__llm_selectors[selectorId] = selectorFn;
+
+                    // Register with Rust
+                    __rust_llm_register_selector(priority, selectorId);
+
+                    return selectorId;
+                } catch (e) {
+                    throw new Error('Failed to register LLM selector: ' + String(e));
+                }
+            }
+        };
     "#;
     let _: rquickjs::Value = ctx.eval(http_code.as_bytes())?;
 

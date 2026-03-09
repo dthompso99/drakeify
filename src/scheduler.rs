@@ -11,14 +11,16 @@ use crate::database::{Database, ScheduledJob};
 use crate::llm::OllamaMessage;
 use crate::{ConversationLoopConfig, StreamingMode, execute_unified_conversation_loop};
 use crate::{ToolRegistry, PluginRegistry, LlmConfig, JsRuntimeConfig};
+use crate::llm_config_manager::LlmConfigManager;
 
 /// Configuration for the scheduled task runner
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SchedulerConfig {
     pub poll_interval_secs: u64,
     pub pod_id: String,  // Unique identifier for this instance (for HA)
     pub llm_model: String,
     pub llm_config: LlmConfig,
+    pub llm_config_manager: Arc<LlmConfigManager>,
     pub context_size: u32,
     pub js_config: JsRuntimeConfig,
     pub enabled_tools: Option<Vec<String>>,
@@ -141,6 +143,7 @@ async fn execute_scheduled_job(
         Some(job.account_id.clone()),
         Some(config.llm_config.clone()),
         Some(config.llm_model.clone()),
+        Some(config.llm_config_manager.clone()),
     )?;
 
     // Load plugins

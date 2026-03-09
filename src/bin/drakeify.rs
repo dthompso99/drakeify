@@ -2,8 +2,9 @@
 // This binary runs only the HTTP proxy server
 
 use anyhow::Result;
-use drakeify::{DrakeifyConfig, init_logging, proxy, Database, SchedulerConfig, start_scheduler, LlmConfig};
+use drakeify::{DrakeifyConfig, init_logging, proxy, Database, SchedulerConfig, start_scheduler, LlmConfig, LlmConfigManager};
 use tracing::info;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -26,6 +27,18 @@ async fn main() -> Result<()> {
         allowed_domains: config.allowed_domains.clone(),
     };
 
+    // Create LlmConfigManager for both proxy and scheduler
+    let llm_config = LlmConfig {
+        host: config.llm_host.clone(),
+        endpoint: config.llm_endpoint.clone(),
+        timeout_secs: 900,
+        account_id: None,  // No account_id from env vars (use database configs for commercial LLMs)
+    };
+
+    let llm_config_manager = Arc::new(
+        LlmConfigManager::new(db.clone(), Some(llm_config.clone())).await?
+    );
+
     // Start scheduler if enabled
     if config.scheduler_enabled {
         info!("🕐 Starting scheduled task runner");
@@ -36,11 +49,8 @@ async fn main() -> Result<()> {
             poll_interval_secs: config.scheduler_poll_interval_secs,
             pod_id: config.scheduler_pod_id.clone(),
             llm_model: config.llm_model.clone(),
-            llm_config: LlmConfig {
-                host: config.llm_host.clone(),
-                endpoint: config.llm_endpoint.clone(),
-                timeout_secs: 900,
-            },
+            llm_config: llm_config.clone(),
+            llm_config_manager: llm_config_manager.clone(),
             context_size: config.context_size,
             js_config: js_config.clone(),
             enabled_tools: config.enabled_tools.clone(),
