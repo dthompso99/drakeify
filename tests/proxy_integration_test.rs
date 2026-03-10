@@ -521,6 +521,62 @@ async fn test_qwen3_coder_tool_call_format() {
 }
 
 #[tokio::test]
+async fn test_copilot_multiline_xml_tool_call_format() {
+    // Test parsing of Copilot-style multi-line XML tool calls
+    // Format: <function=read_file>\n<parameter=filePath>/path</parameter>\n</function></tool_call>
+
+    use serde_json::Value;
+
+    // Simulate a Copilot-style response with multi-line XML
+    let content = r#"I'll help you fix the errors in the roman.js file. First, let me examine the current contents of the file to understand what errors might exist.
+
+<function=read_file>
+<parameter=filePath>
+/home/dthompson/code/test/roman.js
+</parameter>
+<parameter=startLine>
+1
+</parameter>
+<parameter=endLine>
+100
+</parameter>
+</function>
+</tool_call>"#;
+
+    // Parse the XML tool calls using the internal parser
+    let parsed_calls = drakeify::llm::parse_xml_tool_calls_for_test(content);
+
+    println!("\n📋 Copilot Multi-line XML Tool Call Test:");
+    println!("   Content length: {} chars", content.len());
+    println!("   Parsed tool calls: {}", parsed_calls.len());
+
+    assert_eq!(parsed_calls.len(), 1, "Should parse exactly 1 tool call");
+
+    let call = &parsed_calls[0];
+    println!("\n🔧 Parsed Tool Call:");
+    println!("   - function name: {}", call.function.name);
+    println!("   - arguments: {}", serde_json::to_string_pretty(&call.function.arguments).unwrap());
+
+    assert_eq!(call.function.name, "read_file");
+
+    let args = call.function.arguments.as_object().expect("Arguments should be an object");
+    assert_eq!(
+        args.get("filePath").and_then(|v: &Value| v.as_str()),
+        Some("/home/dthompson/code/test/roman.js")
+    );
+    assert_eq!(
+        args.get("startLine").and_then(|v: &Value| v.as_i64()),
+        Some(1)
+    );
+    assert_eq!(
+        args.get("endLine").and_then(|v: &Value| v.as_i64()),
+        Some(100)
+    );
+
+    println!("\n✅ Copilot multi-line XML tool call format test passed");
+}
+
+#[tokio::test]
 async fn test_error_handling_invalid_request() {
     // Test that the proxy handles invalid requests gracefully
 

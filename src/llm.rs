@@ -220,15 +220,17 @@ pub struct LlmResponse {
 }
 
 /// Parse XML-formatted tool calls from content
-/// Some models (like Qwen) return tool calls as XML in the content field:
-/// <function=get_weather><parameter=location>New York</parameter></function></tool_call>
+/// Some models (like Qwen, Copilot) return tool calls as XML in the content field:
+/// Format 1: <function=get_weather><parameter=location>New York</parameter></function></tool_call>
+/// Format 2: <function=read_file>\n<parameter=filePath>/path/to/file</parameter>\n</function></tool_call>
 fn parse_xml_tool_calls(content: &str) -> Vec<OllamaToolCall> {
     let mut tool_calls = Vec::new();
 
     // Regex to match: <function=FUNCTION_NAME>...<parameter=PARAM_NAME>VALUE</parameter>...</function>
-    // This handles the format: <function=get_weather><parameter=location>New York</parameter></function>
-    let function_re = Regex::new(r"<function=([^>]+)>(.*?)</function>").unwrap();
-    let param_re = Regex::new(r"<parameter=([^>]+)>([^<]*)</parameter>").unwrap();
+    // This handles both single-line and multi-line formats
+    // (?s) enables DOTALL mode so . matches newlines
+    let function_re = Regex::new(r"(?s)<function=([^>]+)>(.*?)</function>").unwrap();
+    let param_re = Regex::new(r"(?s)<parameter=([^>]+)>(.*?)</parameter>").unwrap();
 
     for (idx, func_cap) in function_re.captures_iter(content).enumerate() {
         let function_name = func_cap.get(1).map(|m| m.as_str()).unwrap_or("");
@@ -237,9 +239,19 @@ fn parse_xml_tool_calls(content: &str) -> Vec<OllamaToolCall> {
         // Parse parameters
         let mut arguments = serde_json::Map::new();
         for param_cap in param_re.captures_iter(params_section) {
-            let param_name = param_cap.get(1).map(|m| m.as_str()).unwrap_or("");
-            let param_value = param_cap.get(2).map(|m| m.as_str()).unwrap_or("");
-            arguments.insert(param_name.to_string(), Value::String(param_value.to_string()));
+            let param_name = param_cap.get(1).map(|m| m.as_str()).unwrap_or("").trim();
+            let param_value = param_cap.get(2).map(|m| m.as_str()).unwrap_or("").trim();
+
+            // Try to parse as JSON number if it looks like a number
+            let value = if let Ok(num) = param_value.parse::<i64>() {
+                Value::Number(num.into())
+            } else if let Ok(num) = param_value.parse::<f64>() {
+                Value::Number(serde_json::Number::from_f64(num).unwrap_or(0.into()))
+            } else {
+                Value::String(param_value.to_string())
+            };
+
+            arguments.insert(param_name.to_string(), value);
         }
 
         tool_calls.push(OllamaToolCall {
@@ -455,4 +467,10 @@ pub async fn execute_request(
         tool_calls,
         content: response_content,
     })
+}
+
+/// Public wrapper to expose parse_xml_tool_calls for testing
+/// This is used by integration tests to verify XML parsing behavior
+pub fn parse_xml_tool_calls_for_test(content: &str) -> Vec<OllamaToolCall> {
+    parse_xml_tool_calls(content)
 }
