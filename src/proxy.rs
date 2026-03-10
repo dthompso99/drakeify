@@ -6,7 +6,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::sync::Arc;
 use tower_http::cors::{CorsLayer, Any};
 use tracing::{info, debug, error};
@@ -21,15 +21,14 @@ use crate::llm_config_manager::LlmConfigManager;
 
 /// Extract account_id from Authorization header
 /// Format: "Authorization: Bearer <api_key>"
-/// Returns the API key as account_id, or "anonymous" if not present
-fn extract_account_id(headers: &HeaderMap) -> String {
+/// Returns the API key as account_id, or None if not present/invalid
+fn extract_account_id(headers: &HeaderMap) -> Option<String> {
     headers
         .get("authorization")
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("Bearer "))
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "anonymous".to_string())
 }
 
 /// Anthropic system prompt can be string or array of content blocks
@@ -428,9 +427,11 @@ pub async fn start_proxy_server(
 /// Result of the tool execution loop
 enum ToolLoopResult {
     /// Final response with no client tool calls
-    FinalResponse(String),
+    /// (content, selected_model_name)
+    FinalResponse(String, String),
     /// Response with client tool calls that need to be executed by the client
-    ClientToolCalls(String, Vec<OllamaToolCall>),
+    /// (content, tool_calls, selected_model_name)
+    ClientToolCalls(String, Vec<OllamaToolCall>, String),
 }
 
 /// Convert a serde_json::Value to JsonSchema (similar to ToolRegistry::value_to_schema)
@@ -488,34 +489,24 @@ fn execute_tool_loop_streaming(
     plugin_registry: &crate::plugins::PluginRegistry,
     client_tools: &[ToolDefinition],
     tx: &tokio::sync::mpsc::UnboundedSender<StreamMessage>,
+    selected_config: &crate::llm::LlmConfig,
+    selected_model: String,
 ) -> Result<ToolLoopResult> {
-    use crate::{ConversationLoopConfig, StreamingMode, execute_unified_conversation_loop, SelectionContext};
-
-    // Select the appropriate LLM config using the manager
-    // Build selection context from the conversation
-    let selection_context = SelectionContext {
-        account_id: "anonymous".to_string(), // TODO: Pass account_id from caller
-        session_id: None,
-        required_capabilities: vec![],
-        preferred_id: None,
-        metadata: std::collections::HashMap::new(),
-    };
-
-    // Select LLM config (this needs to be async, so we use block_on)
-    let selected_config = tokio::runtime::Handle::current().block_on(
-        state.llm_config_manager.select(selection_context)
-    )?;
+    use crate::{ConversationLoopConfig, StreamingMode, execute_unified_conversation_loop};
 
     // Configure the unified loop for proxy mode
     let loop_config = ConversationLoopConfig {
-        llm_config: &selected_config,
-        llm_model: state.llm_model.clone(),
+        llm_config: selected_config,
+        llm_model: selected_model.clone(),
         context_size: state.context_size,
         tool_registry,
         plugin_registry,
         client_tools: client_tools.to_vec(),
         streaming: StreamingMode::Channel { tx: tx.clone() },
     };
+
+    // Save the model name before moving loop_config
+    let model_name = loop_config.llm_model.clone();
 
     // Execute the unified loop
     // Use block_on since we're in a blocking task
@@ -527,10 +518,11 @@ fn execute_tool_loop_streaming(
     *conversation_messages = result.updated_messages;
 
     // Convert ConversationLoopResult to ToolLoopResult
+    // Include the selected model name in the result
     if result.client_tool_calls.is_empty() {
-        Ok(ToolLoopResult::FinalResponse(result.content))
+        Ok(ToolLoopResult::FinalResponse(result.content, model_name))
     } else {
-        Ok(ToolLoopResult::ClientToolCalls(result.content, result.client_tool_calls))
+        Ok(ToolLoopResult::ClientToolCalls(result.content, result.client_tool_calls, model_name))
     }
 }
 
@@ -543,10 +535,12 @@ fn execute_tool_loop_sync(
     tool_registry: &crate::tools::ToolRegistry,
     plugin_registry: &crate::plugins::PluginRegistry,
     client_tools: &[ToolDefinition],
+    selected_config: &crate::llm::LlmConfig,
+    selected_model: String,
 ) -> Result<ToolLoopResult> {
     // Create a dummy channel for the streaming version
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    execute_tool_loop_streaming(conversation_messages, state, tool_registry, plugin_registry, client_tools, &tx)
+    execute_tool_loop_streaming(conversation_messages, state, tool_registry, plugin_registry, client_tools, &tx, selected_config, selected_model)
 }
 
 /// Handle streaming chat completion request
@@ -559,7 +553,60 @@ async fn handle_streaming_request(
     use std::convert::Infallible;
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let model = request.model.clone();
+
+    // Select LLM config before spawning the task
+    use crate::SelectionContext;
+    let selection_context = SelectionContext {
+        account_id: account_id.clone(),
+        session_id: None,
+        required_capabilities: vec![],
+        preferred_id: None,
+        metadata: std::collections::HashMap::new(),
+    };
+
+    let (selected_config, selected_model) = match state.llm_config_manager.select(selection_context).await {
+        Ok((config, model)) => (config, model),
+        Err(e) => {
+            error!("Failed to select LLM config for streaming: {}", e);
+            let _ = tx.send(StreamMessage::Error(format!("Failed to select LLM: {}", e)));
+            let _ = tx.send(StreamMessage::Done);
+            let stream = UnboundedReceiverStream::new(rx).map(move |msg| {
+                match msg {
+                    StreamMessage::Error(e) => {
+                        let chunk = serde_json::json!({
+                            "id": format!("chatcmpl-{}", chrono::Utc::now().timestamp()),
+                            "object": "chat.completion.chunk",
+                            "created": chrono::Utc::now().timestamp(),
+                            "model": request.model.clone(),
+                            "choices": [{
+                                "index": 0,
+                                "delta": {"content": format!("\n\nError: {}\n", e)},
+                                "finish_reason": "error"
+                            }]
+                        });
+                        Ok::<_, Infallible>(Event::default().data(serde_json::to_string(&chunk).unwrap()))
+                    }
+                    _ => {
+                        let chunk = serde_json::json!({
+                            "id": format!("chatcmpl-{}", chrono::Utc::now().timestamp()),
+                            "object": "chat.completion.chunk",
+                            "created": chrono::Utc::now().timestamp(),
+                            "model": request.model.clone(),
+                            "choices": [{
+                                "index": 0,
+                                "delta": {},
+                                "finish_reason": "stop"
+                            }]
+                        });
+                        Ok(Event::default().data(serde_json::to_string(&chunk).unwrap()))
+                    }
+                }
+            });
+            return Sse::new(stream).into_response();
+        }
+    };
+
+    let model = selected_model.clone();
 
     // Spawn task to handle the streaming
     tokio::spawn(async move {
@@ -627,6 +674,8 @@ async fn handle_streaming_request(
                 &plugin_registry,
                 &client_tools,
                 &tx_clone,
+                &selected_config,
+                selected_model,
             ) {
                 Ok(_) => {
                     // Stream messages are already sent via tx_clone
@@ -1008,7 +1057,19 @@ async fn chat_completions_handler(
     Json(request): Json<ChatCompletionRequest>,
 ) -> Response {
     // Extract account_id from Authorization header
-    let account_id = extract_account_id(&headers);
+    let account_id = match extract_account_id(&headers) {
+        Some(id) => id,
+        None => {
+            // Return 401 Unauthorized if no valid auth token
+            return (StatusCode::UNAUTHORIZED, Json(json!({
+                "error": {
+                    "message": "Authentication required. Please provide a valid Bearer token.",
+                    "type": "authentication_error",
+                    "code": "unauthorized"
+                }
+            }))).into_response();
+        }
+    };
     info!("📨 Received chat completion request for model: {} (account: {})", request.model, account_id);
     info!("   Messages: {}", request.messages.len());
 
@@ -1051,6 +1112,39 @@ async fn chat_completions_handler(
         return handle_streaming_request(state, request, account_id).await;
     }
 
+    // Select LLM config early so we can use the selected model name in error responses
+    use crate::SelectionContext;
+    let selection_context = SelectionContext {
+        account_id: account_id.clone(),
+        session_id: None,
+        required_capabilities: vec![],
+        preferred_id: None,
+        metadata: std::collections::HashMap::new(),
+    };
+
+    let (selected_config, selected_model) = match state.llm_config_manager.select(selection_context).await {
+        Ok((config, model)) => (config, model),
+        Err(e) => {
+            error!("Failed to select LLM config: {}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(ChatCompletionResponse {
+                id: format!("chatcmpl-{}", chrono::Utc::now().timestamp()),
+                object: "chat.completion".to_string(),
+                created: chrono::Utc::now().timestamp() as u64,
+                model: request.model.clone(),
+                choices: vec![Choice {
+                    index: 0,
+                    message: ChatMessage {
+                        role: "assistant".to_string(),
+                        content: Some(MessageContent::Text(format!("Error selecting LLM: {}", e))),
+                        tool_calls: None,
+                        tool_call_id: None,
+                    },
+                    finish_reason: Some("error".to_string()),
+                }],
+            })).into_response();
+        }
+    };
+
     // Convert OpenAI messages to Ollama format
     let mut conversation_messages: Vec<OllamaMessage> = request.messages.iter().map(|msg| {
         OllamaMessage {
@@ -1064,6 +1158,8 @@ async fn chat_completions_handler(
     let state_clone = state.as_ref().clone();
     let client_tools = request.tools.clone();
     let account_id_clone = account_id.clone();
+    let selected_model_for_closure = selected_model.clone();
+    let selected_model_for_error = selected_model.clone();
 
     // Execute the tool loop in a blocking task (ToolRegistry and PluginRegistry are not Send)
     let result = tokio::task::spawn_blocking(move || {
@@ -1105,6 +1201,8 @@ async fn chat_completions_handler(
             &tool_registry,
             &plugin_registry,
             &client_tools,
+            &selected_config,
+            selected_model_for_closure,
         )?;
 
         // Return both the loop result and the updated messages
@@ -1113,7 +1211,7 @@ async fn chat_completions_handler(
 
     // Handle the result from the blocking task
     match result {
-        Ok(Ok((ToolLoopResult::FinalResponse(final_content), updated_messages))) => {
+        Ok(Ok((ToolLoopResult::FinalResponse(final_content, selected_model), updated_messages))) => {
             // Generate session ID and save session
             let session_id = format!("proxy_session_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
             let messages_json = serde_json::to_string(&updated_messages).unwrap_or_else(|_| "[]".to_string());
@@ -1135,7 +1233,7 @@ async fn chat_completions_handler(
                 id: format!("chatcmpl-{}", chrono::Utc::now().timestamp()),
                 object: "chat.completion".to_string(),
                 created: chrono::Utc::now().timestamp() as u64,
-                model: request.model.clone(),
+                model: selected_model,  // Use the selected model name instead of request.model
                 choices: vec![Choice {
                     index: 0,
                     message: ChatMessage {
@@ -1151,7 +1249,7 @@ async fn chat_completions_handler(
             info!("✅ Sending final response (session: {})", session_id);
             (StatusCode::OK, Json(response)).into_response()
         }
-        Ok(Ok((ToolLoopResult::ClientToolCalls(content, ollama_tool_calls), updated_messages))) => {
+        Ok(Ok((ToolLoopResult::ClientToolCalls(content, ollama_tool_calls, selected_model), updated_messages))) => {
             // Generate session ID and save session
             let session_id = format!("proxy_session_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
             let messages_json = serde_json::to_string(&updated_messages).unwrap_or_else(|_| "[]".to_string());
@@ -1189,7 +1287,7 @@ async fn chat_completions_handler(
                 id: format!("chatcmpl-{}", chrono::Utc::now().timestamp()),
                 object: "chat.completion".to_string(),
                 created: chrono::Utc::now().timestamp() as u64,
-                model: request.model.clone(),
+                model: selected_model.clone(),  // Use the selected model name instead of request.model
                 choices: vec![Choice {
                     index: 0,
                     message: ChatMessage {
@@ -1217,7 +1315,7 @@ async fn chat_completions_handler(
                         id: format!("chatcmpl-{}", chrono::Utc::now().timestamp()),
                         object: "chat.completion".to_string(),
                         created: chrono::Utc::now().timestamp() as u64,
-                        model: request.model.clone(),
+                        model: selected_model.clone(),  // Use the selected model name in error response too
                         choices: vec![Choice {
                             index: 0,
                             message: ChatMessage {
@@ -1238,7 +1336,7 @@ async fn chat_completions_handler(
                 id: format!("chatcmpl-{}", chrono::Utc::now().timestamp()),
                 object: "chat.completion".to_string(),
                 created: chrono::Utc::now().timestamp() as u64,
-                model: request.model.clone(),
+                model: selected_model_for_error.clone(),  // Use the selected model name
                 choices: vec![Choice {
                     index: 0,
                     message: ChatMessage {
@@ -1257,7 +1355,7 @@ async fn chat_completions_handler(
                 id: format!("chatcmpl-{}", chrono::Utc::now().timestamp()),
                 object: "chat.completion".to_string(),
                 created: chrono::Utc::now().timestamp() as u64,
-                model: request.model.clone(),
+                model: selected_model_for_error,  // Use the selected model name
                 choices: vec![Choice {
                     index: 0,
                     message: ChatMessage {

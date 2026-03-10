@@ -120,8 +120,16 @@ impl LlmConfigManager {
     }
 
     /// Main selection method - tries hooks, then capabilities, then default
-    pub async fn select(&self, context: SelectionContext) -> Result<LlmConfig> {
+    /// Returns (LlmConfig, model_name)
+    pub async fn select(&self, context: SelectionContext) -> Result<(LlmConfig, String)> {
         debug!("Selecting LLM for context: {:?}", context);
+
+        // Refresh cache to ensure we have the latest configs from the database
+        // This is important when configs are updated via the Web UI
+        if let Err(e) = self.refresh_cache().await {
+            warn!("Failed to refresh LLM config cache: {}", e);
+            // Continue with stale cache rather than failing
+        }
 
         // 1. Try plugin hooks first (in priority order)
         let hooks = self.selection_hooks.read().await;
@@ -158,11 +166,12 @@ impl LlmConfigManager {
     }
 
     /// Get a specific LLM configuration by ID
-    pub async fn get_config(&self, id: &str) -> Result<LlmConfig> {
+    /// Returns (LlmConfig, model_name)
+    pub async fn get_config(&self, id: &str) -> Result<(LlmConfig, String)> {
         let cache = self.cache.read().await;
 
         if let Some(record) = cache.get(id) {
-            Ok(record.to_llm_config())
+            Ok((record.to_llm_config(), record.model.clone()))
         } else {
             anyhow::bail!("LLM configuration not found: {}", id)
         }
@@ -170,7 +179,8 @@ impl LlmConfigManager {
 
     /// Select LLM by required capabilities
     /// Returns the highest priority enabled LLM that has all required capabilities
-    pub async fn select_by_capability(&self, required_caps: &[String]) -> Result<Option<LlmConfig>> {
+    /// Returns (LlmConfig, model_name)
+    pub async fn select_by_capability(&self, required_caps: &[String]) -> Result<Option<(LlmConfig, String)>> {
         let cache = self.cache.read().await;
 
         let mut candidates: Vec<&LlmConfigRecord> = cache.values()
@@ -188,15 +198,19 @@ impl LlmConfigManager {
         candidates.sort_by(|a, b| b.priority.cmp(&a.priority));
 
         if let Some(config) = candidates.first() {
-            Ok(Some(config.to_llm_config()))
+            Ok(Some((config.to_llm_config(), config.model.clone())))
         } else {
             Ok(None)
         }
     }
 
     /// Select the default LLM
-    /// Falls back to env vars if no default is configured
-    pub async fn select_default(&self) -> Result<LlmConfig> {
+    /// Falls back to highest priority enabled config, then env vars if no default is configured
+    /// Returns (LlmConfig, model_name)
+    ///
+    /// Note: When falling back to env vars, the model name must be provided separately
+    /// via the DRAKEIFY_LLM_MODEL environment variable
+    pub async fn select_default(&self) -> Result<(LlmConfig, String)> {
         // Try database default
         let default_id_opt = {
             let default_id = self.default_id.read().await;
@@ -212,10 +226,28 @@ impl LlmConfigManager {
             }
         }
 
+        // If no default is set or it's invalid, try to use the highest priority enabled config
+        debug!("No valid default LLM ID, selecting highest priority enabled config");
+        let cache = self.cache.read().await;
+        let mut enabled_configs: Vec<&LlmConfigRecord> = cache.values()
+            .filter(|c| c.enabled)
+            .collect();
+
+        // Sort by priority (descending)
+        enabled_configs.sort_by(|a, b| b.priority.cmp(&a.priority));
+
+        if let Some(config) = enabled_configs.first() {
+            debug!("Using highest priority LLM: {} (priority: {})", config.id, config.priority);
+            return Ok((config.to_llm_config(), config.model.clone()));
+        }
+        drop(cache);
+
         // Fall back to env vars
+        // NOTE: This returns a placeholder model name "default" because the env_fallback
+        // doesn't include the model name. The caller must use the model from DrakeifyConfig.
         if let Some(ref env_config) = self.env_fallback {
             debug!("Falling back to environment variable LLM config");
-            return Ok(env_config.clone());
+            return Ok((env_config.clone(), "default".to_string()));
         }
 
         anyhow::bail!("No LLM configuration available (no default set and no env vars)")

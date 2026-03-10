@@ -7,6 +7,8 @@ use anyhow::Result;
 use std::time::Duration;
 use colored::Colorize;
 use std::collections::BTreeMap;
+use regex::Regex;
+use tracing::debug;
 
 #[derive(Serialize, Debug, Clone)]
 pub struct JsonSchema {
@@ -217,6 +219,42 @@ pub struct LlmResponse {
     pub content: String,
 }
 
+/// Parse XML-formatted tool calls from content
+/// Some models (like Qwen) return tool calls as XML in the content field:
+/// <function=get_weather><parameter=location>New York</parameter></function></tool_call>
+fn parse_xml_tool_calls(content: &str) -> Vec<OllamaToolCall> {
+    let mut tool_calls = Vec::new();
+
+    // Regex to match: <function=FUNCTION_NAME>...<parameter=PARAM_NAME>VALUE</parameter>...</function>
+    // This handles the format: <function=get_weather><parameter=location>New York</parameter></function>
+    let function_re = Regex::new(r"<function=([^>]+)>(.*?)</function>").unwrap();
+    let param_re = Regex::new(r"<parameter=([^>]+)>([^<]*)</parameter>").unwrap();
+
+    for (idx, func_cap) in function_re.captures_iter(content).enumerate() {
+        let function_name = func_cap.get(1).map(|m| m.as_str()).unwrap_or("");
+        let params_section = func_cap.get(2).map(|m| m.as_str()).unwrap_or("");
+
+        // Parse parameters
+        let mut arguments = serde_json::Map::new();
+        for param_cap in param_re.captures_iter(params_section) {
+            let param_name = param_cap.get(1).map(|m| m.as_str()).unwrap_or("");
+            let param_value = param_cap.get(2).map(|m| m.as_str()).unwrap_or("");
+            arguments.insert(param_name.to_string(), Value::String(param_value.to_string()));
+        }
+
+        tool_calls.push(OllamaToolCall {
+            id: Some(format!("xml_call_{}", idx)),
+            function: OllamaFunctionCall {
+                index: Some(idx as u32),
+                name: function_name.to_string(),
+                arguments: Value::Object(arguments),
+            },
+        });
+    }
+
+    tool_calls
+}
+
 /// Execute a single LLM request and return any tool calls that were made
 pub async fn execute_request(
     request: OllamaRequest,
@@ -403,6 +441,16 @@ pub async fn execute_request(
             }
         }
     }
+
+    // If no tool calls were found in the standard format, try parsing XML tool calls from content
+    if tool_calls.is_empty() && !response_content.is_empty() {
+        let xml_tool_calls = parse_xml_tool_calls(&response_content);
+        if !xml_tool_calls.is_empty() {
+            debug!("Parsed {} XML tool calls from content", xml_tool_calls.len());
+            tool_calls.extend(xml_tool_calls);
+        }
+    }
+
     Ok(LlmResponse {
         tool_calls,
         content: response_content,
