@@ -406,6 +406,20 @@
                             </div>
 
                             <div style="margin-bottom: 1rem;">
+                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 500;">Context Size *</label>
+                                <input type="number" id="config-context-size" required value="32768" min="1024" max="1048576"
+                                       style="width: 100%; padding: 0.5rem; border: 1px solid #475569; border-radius: 6px; background: #0f172a; color: #e2e8f0;">
+                                <small style="color: #94a3b8;">Maximum context window in tokens (e.g., 32768, 128000, 262144)</small>
+                            </div>
+
+                            <div style="margin-bottom: 1rem;">
+                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 500;">Timeout (seconds) *</label>
+                                <input type="number" id="config-timeout" required value="900" min="10" max="3600"
+                                       style="width: 100%; padding: 0.5rem; border: 1px solid #475569; border-radius: 6px; background: #0f172a; color: #e2e8f0;">
+                                <small style="color: #94a3b8;">Request timeout in seconds (default: 900 = 15 minutes)</small>
+                            </div>
+
+                            <div style="margin-bottom: 1rem;">
                                 <label style="display: block; margin-bottom: 0.5rem; font-weight: 500;">Priority *</label>
                                 <input type="number" id="config-priority" required value="100" min="0"
                                        style="width: 100%; padding: 0.5rem; border: 1px solid #475569; border-radius: 6px; background: #0f172a; color: #e2e8f0;">
@@ -517,11 +531,12 @@
                 if (configs.length === 0) {
                     list.innerHTML = '<div class="empty-state">No configurations found. Click "Add Configuration" to create one.</div>';
                 } else {
-                    list.innerHTML = '<table><thead><tr><th>Name</th><th>Model</th><th>Host</th><th>Priority</th><th>Status</th><th>Actions</th></tr></thead><tbody>' +
+                    list.innerHTML = '<table><thead><tr><th>Name</th><th>Model</th><th>Host</th><th>Context Size</th><th>Priority</th><th>Status</th><th>Actions</th></tr></thead><tbody>' +
                         configs.map(c => `<tr>
                             <td><strong>${c.name}</strong></td>
                             <td>${c.model}</td>
                             <td>${c.host}</td>
+                            <td>${(c.context_size || 32768).toLocaleString()} tokens</td>
                             <td>${c.priority}</td>
                             <td><span class="badge badge-${c.enabled ? 'enabled' : 'disabled'}">${c.enabled ? 'Enabled' : 'Disabled'}</span></td>
                             <td>
@@ -561,6 +576,8 @@
             document.getElementById('config-id').value = '';
             document.getElementById('config-enabled').checked = true;
             document.getElementById('config-priority').value = '100';
+            document.getElementById('config-context-size').value = '32768';
+            document.getElementById('config-timeout').value = '900';
             document.getElementById('config-form-modal').style.display = 'block';
         }
 
@@ -580,6 +597,8 @@
                 document.getElementById('config-name').value = config.name;
                 document.getElementById('config-model').value = config.model;
                 document.getElementById('config-host').value = config.host;
+                document.getElementById('config-context-size').value = config.context_size || 32768;
+                document.getElementById('config-timeout').value = config.timeout_secs || 900;
                 document.getElementById('config-priority').value = config.priority;
                 document.getElementById('config-enabled').checked = config.enabled;
                 document.getElementById('config-api-key').value = ''; // Don't show existing key
@@ -604,6 +623,8 @@
                 model: document.getElementById('config-model').value,
                 host: document.getElementById('config-host').value,
                 endpoint: '/v1/chat/completions', // Default endpoint
+                context_size: parseInt(document.getElementById('config-context-size').value),
+                timeout_secs: parseInt(document.getElementById('config-timeout').value),
                 priority: parseInt(document.getElementById('config-priority').value),
                 enabled: document.getElementById('config-enabled').checked
             };
