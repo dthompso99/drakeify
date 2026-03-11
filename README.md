@@ -6,6 +6,8 @@ Out of the box, Drakeify behaves as a smart proxy. It sits in front of your LLM,
 
 Drakeify also provides a plugin and tool system that allows you to extend and customize how your LLM behaves.
 
+Built as a stateless, horizontally scalable agent platform, with externalized session state, memory, and configuration to support distributed operation across many runtime nodes.
+
 Key features:
 
 - **Proxy normalization** – Drakeify cleans up inconsistent LLM responses and converts them into reliable structured output for clients.
