@@ -8,6 +8,14 @@ Drakeify also provides a plugin and tool system that allows you to extend and cu
 
 Built as a stateless, horizontally scalable agent platform, with externalized session state, memory, and configuration to support distributed operation across many runtime nodes.
 
+## Flexible Agent Runtime
+
+Drakeify is designed to support a wide range of use cases, from personal automation to large-scale enterprise deployments.
+
+For individuals, Drakeify can power a personal assistant capable of scheduling tasks, interacting with services, sending messages, and responding to events.
+
+For organizations, Drakeify provides a horizontally scalable agent runtime with centralized state management and configurable guardrails, allowing AI-driven workflows to interact safely with internal systems and APIs.
+
 Key features:
 
 - **Proxy normalization** – Drakeify cleans up inconsistent LLM responses and converts them into reliable structured output for clients.
