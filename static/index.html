@@ -275,6 +275,12 @@
                 loader: loadPlaceholderView
             },
             {
+                id: 'session-logs',
+                name: 'Session Logs',
+                section: 'Monitoring',
+                loader: loadSessionLogsView
+            },
+            {
                 id: 'settings',
                 name: 'Settings',
                 section: 'System',
@@ -495,1302 +501,213 @@
             loadUnpublishedPlugins();
         }
 
+        function loadSessionLogsView(viewId) {
+            const container = document.getElementById('view-container');
+            container.innerHTML = `
+                <div class="card">
+                    <h2>Session Logs</h2>
+                    <p>Browse and search session logs by account ID or session ID.</p>
+                    
+                    <div style="margin-bottom: 1.5rem; display: flex; gap: 1rem;">
+                        <div style="flex: 1;">
+                            <label style="display: block; margin-bottom: 0.5rem; font-weight: 500;">Account ID</label>
+                            <input type="text" id="account-search" placeholder="Enter account ID..." style="width: 100%; padding: 0.5rem; border: 1px solid #475569; border-radius: 6px; background: #0f172a; color: #e2e8f0;">
+                        </div>
+                        <div style="flex: 1;">
+                            <label style="display: block; margin-bottom: 0.5rem; font-weight: 500;">Session ID</label>
+                            <input type="text" id="session-search" placeholder="Enter session ID..." style="width: 100%; padding: 0.5rem; border: 1px solid #475569; border-radius: 6px; background: #0f172a; color: #e2e8f0;">
+                        </div>
+                        <button onclick="searchSessions()" class="btn btn-primary" style="margin-top: 1.5rem;">Search</button>
+                    </div>
+
+                    <div id="sessions-list">
+                        <div class="loading">Enter an account ID to view sessions</div>
+                    </div>
+                </div>
+                
+                <!-- Session Details Modal -->
+                <div id="session-details-modal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); z-index: 1000; padding: 2rem; overflow-y: auto;">
+                    <div style="max-width: 1000px; margin: 0 auto; background: #1e293b; border-radius: 12px; padding: 2rem; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.5);">
+                        <h2 id="session-details-title" style="margin-bottom: 1.5rem;">Session Details</h2>
+                        <div id="session-details-content"></div>
+                        <div style="display: flex; justify-content: flex-end; margin-top: 1.5rem;">
+                            <button onclick="closeSessionDetails()" class="btn" style="background: #475569;">Close</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            // Auto-focus on account search field
+            document.getElementById('account-search').focus();
+        }
+
+        function searchSessions() {
+            const accountId = document.getElementById('account-search').value.trim();
+            const sessionId = document.getElementById('session-search').value.trim();
+            
+            if (!accountId && !sessionId) {
+                alert('Please enter an account ID or session ID to search');
+                return;
+            }
+            
+            const container = document.getElementById('sessions-list');
+            container.innerHTML = '<div class="loading">Loading sessions...</div>';
+
+            // Build URL with parameters
+            let url = '/api/sessions';
+            if (accountId) {
+                url += `?account_id=${encodeURIComponent(accountId)}`;
+                if (sessionId) {
+                    url += `&session_id=${encodeURIComponent(sessionId)}`;
+                }
+            } else if (sessionId) {
+                url += `?session_id=${encodeURIComponent(sessionId)}`;
+            }
+
+            fetch(url, {
+                headers: { 'Authorization': 'Bearer ' + authToken }
+            })
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('Network response was not ok');
+                }
+                return response.json();
+            })
+            .then(data => {
+                displaySessionList(data);
+            })
+            .catch(error => {
+                console.error('Error fetching sessions:', error);
+                container.innerHTML = '<div class="error">Failed to load sessions. ' + error.message + '</div>';
+            });
+        }
+
+        function displaySessionList(sessions) {
+            const container = document.getElementById('sessions-list');
+            
+            if (!sessions || sessions.length === 0) {
+                container.innerHTML = '<div class="empty-state">No sessions found</div>';
+                return;
+            }
+            
+            let html = `
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Session ID</th>
+                            <th>Account ID</th>
+                            <th>Created</th>
+                            <th>Updated</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+            
+            sessions.forEach(session => {
+                const createdDate = new Date(session.created_at).toLocaleString();
+                const updatedDate = new Date(session.updated_at).toLocaleString();
+                
+                html += `
+                    <tr>
+                        <td>${session.session_id}</td>
+                        <td>${session.account_id}</td>
+                        <td>${createdDate}</td>
+                        <td>${updatedDate}</td>
+                        <td>
+                            <button onclick="viewSession('${session.session_id}', '${session.account_id}')" class="btn btn-sm btn-primary">View</button>
+                        </td>
+                    </tr>
+                `;
+            });
+            
+            html += `
+                    </tbody>
+                </table>
+            `;
+            
+            container.innerHTML = html;
+        }
+
+        function viewSession(sessionId, accountId) {
+            const modal = document.getElementById('session-details-modal');
+            const content = document.getElementById('session-details-content');
+            
+            content.innerHTML = '<div class="loading">Loading session details...</div>';
+            modal.style.display = 'flex';
+            
+            fetch(`/api/sessions/${sessionId}?account_id=${encodeURIComponent(accountId)}`, {
+                headers: { 'Authorization': 'Bearer ' + authToken }
+            })
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('Network response was not ok');
+                }
+                return response.json();
+            })
+            .then(data => {
+                const metadata = data.metadata ? JSON.parse(data.metadata) : {};
+                let html = `
+                    <div style="margin-bottom: 1.5rem;">
+                        <h3 style="color: #f1f5f9; margin-top: 0;">Session Details</h3>
+                        <table style="width: 100%; border-collapse: collapse;">
+                            <tr>
+                                <td style="padding: 0.75rem; border-bottom: 1px solid #334155;"><strong>Session ID:</strong></td>
+                                <td style="padding: 0.75rem; border-bottom: 1px solid #334155;">${sessionId}</td>
+                            </tr>
+                            <tr>
+                                <td style="padding: 0.75rem; border-bottom: 1px solid #334155;"><strong>Account ID:</strong></td>
+                                <td style="padding: 0.75rem; border-bottom: 1px solid #334155;">${accountId}</td>
+                            </tr>
+                            <tr>
+                                <td style="padding: 0.75rem; border-bottom: 1px solid #334155;"><strong>Created:</strong></td>
+                                <td style="padding: 0.75rem; border-bottom: 1px solid #334155;">${new Date(data.created_at).toLocaleString()}</td>
+                            </tr>
+                            <tr>
+                                <td style="padding: 0.75rem; border-bottom: 1px solid #334155;"><strong>Updated:</strong></td>
+                                <td style="padding: 0.75rem; border-bottom: 1px solid #334155;">${new Date(data.updated_at).toLocaleString()}</td>
+                            </tr>
+                `;
+                
+                if (metadata && Object.keys(metadata).length > 0) {
+                    html += `
+                        <tr>
+                            <td style="padding: 0.75rem; border-bottom: 1px solid #334155;"><strong>Metadata:</strong></td>
+                            <td style="padding: 0.75rem; border-bottom: 1px solid #334155;"><pre>${JSON.stringify(metadata, null, 2)}</pre></td>
+                        </tr>
+                    `;
+                }
+                
+                html += `
+                        </table>
+                    </div>
+                    <div style="margin-bottom: 1.5rem;">
+                        <h3 style="color: #f1f5f9; margin-top: 0;">Messages</h3>
+                        <pre style="background: #0f172a; padding: 1rem; border-radius: 6px; overflow-x: auto; max-height: 400px; overflow-y: auto;">${JSON.stringify(JSON.parse(data.messages), null, 2)}</pre>
+                    </div>
+                `;
+                
+                content.innerHTML = html;
+            })
+            .catch(error => {
+                console.error('Error fetching session details:', error);
+                content.innerHTML = '<div class="error">Failed to load session details. ' + error.message + '</div>';
+            });
+        }
+
+        function closeSessionDetails() {
+            document.getElementById('session-details-modal').style.display = 'none';
+        }
+
         function loadPlaceholderView(viewId) {
             const view = viewRegistry.find(v => v.id === viewId);
             const container = document.getElementById('view-container');
             container.innerHTML = `
                 <div class="card">
                     <h2>${view.name}</h2>
-                    <p>${view.name} interface coming soon...</p>
+                    <p>Placeholder view for ${view.name}.</p>
                 </div>
             `;
-        }
-
-        // Load configurations
-        function loadConfigs() {
-            if (!authToken) {
-                document.getElementById('config-list').innerHTML =
-                    '<div class="error">Please enter your authentication token above</div>';
-                return;
-            }
-
-            fetch('/api/llm/configs', {
-                headers: { 'Authorization': 'Bearer ' + authToken }
-            })
-            .then(r => {
-                if (!r.ok) {
-                    if (r.status === 401) {
-                        throw new Error('Authentication failed');
-                    }
-                    throw new Error('Request failed');
-                }
-                return r.json();
-            })
-            .then(configs => {
-                const list = document.getElementById('config-list');
-                if (configs.length === 0) {
-                    list.innerHTML = '<div class="empty-state">No configurations found. Click "Add Configuration" to create one.</div>';
-                } else {
-                    list.innerHTML = '<table><thead><tr><th>Name</th><th>Model</th><th>Host</th><th>Context Size</th><th>Priority</th><th>Status</th><th>Actions</th></tr></thead><tbody>' +
-                        configs.map(c => `<tr>
-                            <td><strong>${c.name}</strong></td>
-                            <td>${c.model}</td>
-                            <td>${c.host}</td>
-                            <td>${(c.context_size || 32768).toLocaleString()} tokens</td>
-                            <td>${c.priority}</td>
-                            <td><span class="badge badge-${c.enabled ? 'enabled' : 'disabled'}">${c.enabled ? 'Enabled' : 'Disabled'}</span></td>
-                            <td>
-                                <button onclick="editConfig('${c.id}')" class="btn btn-sm" style="background: #3b82f6; margin-right: 0.25rem;">Edit</button>
-                                <button onclick="deleteConfig('${c.id}', '${c.name.replace(/'/g, "\\'")}')" class="btn btn-sm" style="background: #ef4444;">Delete</button>
-                            </td>
-                        </tr>`).join('') +
-                        '</tbody></table>';
-                }
-            })
-            .catch(err => {
-                console.error('Load configs error:', err);
-                const configList = document.getElementById('config-list');
-                if (configList) {
-                    // Only clear auth token if this is actually an authentication error
-                    if (err.message === 'Authentication failed') {
-                        localStorage.removeItem('drakeify_token');
-                        authToken = null;
-                        configList.innerHTML =
-                            '<div class="error">Authentication failed. Please enter your token again.</div>';
-                        showLoginForm();
-                    } else {
-                        configList.innerHTML =
-                            '<div class="error">Failed to load configurations. Please try again.</div>';
-                    }
-                }
-            });
-        }
-
-        // ============================================================================
-        // LLM CONFIG CRUD OPERATIONS
-        // ============================================================================
-
-        function showAddConfigForm() {
-            document.getElementById('form-title').textContent = 'Add LLM Configuration';
-            document.getElementById('config-form').reset();
-            document.getElementById('config-id').value = '';
-            document.getElementById('config-enabled').checked = true;
-            document.getElementById('config-priority').value = '100';
-            document.getElementById('config-context-size').value = '32768';
-            document.getElementById('config-timeout').value = '900';
-            document.getElementById('config-form-modal').style.display = 'block';
-        }
-
-        function hideConfigForm() {
-            document.getElementById('config-form-modal').style.display = 'none';
-        }
-
-        function editConfig(id) {
-            // Fetch the config details
-            fetch(`/api/llm/configs/${id}`, {
-                headers: { 'Authorization': 'Bearer ' + authToken }
-            })
-            .then(r => r.json())
-            .then(config => {
-                document.getElementById('form-title').textContent = 'Edit LLM Configuration';
-                document.getElementById('config-id').value = config.id;
-                document.getElementById('config-name').value = config.name;
-                document.getElementById('config-model').value = config.model;
-                document.getElementById('config-host').value = config.host;
-                document.getElementById('config-context-size').value = config.context_size || 32768;
-                document.getElementById('config-timeout').value = config.timeout_secs || 900;
-                document.getElementById('config-priority').value = config.priority;
-                document.getElementById('config-enabled').checked = config.enabled;
-                document.getElementById('config-api-key').value = ''; // Don't show existing key
-                document.getElementById('config-api-key').placeholder = 'Leave empty to keep existing';
-                document.getElementById('config-form-modal').style.display = 'block';
-            })
-            .catch(err => {
-                console.error('Error loading config:', err);
-                alert('Failed to load configuration');
-            });
-        }
-
-        function saveConfig(event) {
-            event.preventDefault();
-
-            const id = document.getElementById('config-id').value;
-            const name = document.getElementById('config-name').value;
-
-            const data = {
-                id: id || name.toLowerCase().replace(/[^a-z0-9]+/g, '-'), // Generate ID from name if creating
-                name: name,
-                model: document.getElementById('config-model').value,
-                host: document.getElementById('config-host').value,
-                endpoint: '/v1/chat/completions', // Default endpoint
-                context_size: parseInt(document.getElementById('config-context-size').value),
-                timeout_secs: parseInt(document.getElementById('config-timeout').value),
-                priority: parseInt(document.getElementById('config-priority').value),
-                enabled: document.getElementById('config-enabled').checked
-            };
-
-            // Only include account_id (API key) if it's been entered
-            const apiKey = document.getElementById('config-api-key').value;
-            if (apiKey) {
-                data.account_id = apiKey;
-            }
-
-            const url = id ? `/api/llm/configs/${id}` : '/api/llm/configs';
-            const method = id ? 'PUT' : 'POST';
-
-            fetch(url, {
-                method: method,
-                headers: {
-                    'Authorization': 'Bearer ' + authToken,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(data)
-            })
-            .then(r => {
-                if (!r.ok) throw new Error('Save failed');
-                return r.json();
-            })
-            .then(() => {
-                hideConfigForm();
-                loadConfigs();
-            })
-            .catch(err => {
-                console.error('Error saving config:', err);
-                alert('Failed to save configuration');
-            });
-        }
-
-        function deleteConfig(id, name) {
-            if (!confirm(`Are you sure you want to delete "${name}"?`)) {
-                return;
-            }
-
-            fetch(`/api/llm/configs/${id}`, {
-                method: 'DELETE',
-                headers: { 'Authorization': 'Bearer ' + authToken }
-            })
-            .then(r => {
-                if (!r.ok) throw new Error('Delete failed');
-                loadConfigs();
-            })
-            .catch(err => {
-                console.error('Error deleting config:', err);
-                alert('Failed to delete configuration');
-            });
-        }
-
-        // ============================================================================
-        // PLUGIN MANAGEMENT
-        // ============================================================================
-
-        function showPluginTab(tabName) {
-            // Update tab buttons
-            document.querySelectorAll('.plugin-tab').forEach(tab => {
-                tab.style.borderBottom = 'none';
-                tab.style.color = '#94a3b8';
-            });
-            document.getElementById(`tab-${tabName}`).style.borderBottom = '2px solid #3b82f6';
-            document.getElementById(`tab-${tabName}`).style.color = '#3b82f6';
-
-            // Show/hide tab content
-            document.querySelectorAll('.plugin-tab-content').forEach(content => {
-                content.style.display = 'none';
-            });
-            document.getElementById(`${tabName}-plugins-tab`).style.display = 'block';
-        }
-
-        function loadInstalledPlugins() {
-            if (!authToken) {
-                document.getElementById('installed-plugins-list').innerHTML =
-                    '<div class="error">Please authenticate first</div>';
-                return;
-            }
-
-            fetch('/api/plugins', {
-                headers: { 'Authorization': 'Bearer ' + authToken }
-            })
-            .then(r => {
-                if (!r.ok) throw new Error('Failed to load plugins');
-                return r.json();
-            })
-            .then(plugins => {
-                const list = document.getElementById('installed-plugins-list');
-                if (plugins.length === 0) {
-                    list.innerHTML = '<div class="empty-state">No plugins installed. Switch to the "Available" tab to install plugins.</div>';
-                } else {
-                    list.innerHTML = '<table><thead><tr><th>Name</th><th>Version</th><th>Description</th><th>Author</th><th>Actions</th></tr></thead><tbody>' +
-                        plugins.map(p => `<tr>
-                            <td><strong>${p.name}</strong></td>
-                            <td>${p.version}</td>
-                            <td>${p.description}</td>
-                            <td>${p.author || 'Unknown'}</td>
-                            <td>
-                                <button onclick="showPluginConfigModal('${p.name}')" class="btn btn-sm" style="background: #3b82f6; margin-right: 0.5rem;">Configure</button>
-                                <button onclick="uninstallPlugin('${p.name}')" class="btn btn-sm" style="background: #ef4444;">Uninstall</button>
-                            </td>
-                        </tr>`).join('') +
-                        '</tbody></table>' +
-                        '<div style="margin-top: 1rem; padding: 1rem; background: #334155; border-radius: 8px; color: #94a3b8;">' +
-                        '<strong>⚠️ Note:</strong> After installing or uninstalling plugins, you must restart the drakeify proxy for changes to take effect.' +
-                        '</div>';
-                }
-            })
-            .catch(err => {
-                console.error('Error loading installed plugins:', err);
-                document.getElementById('installed-plugins-list').innerHTML =
-                    '<div class="error">Failed to load installed plugins</div>';
-            });
-        }
-
-        async function loadAvailablePlugins() {
-            if (!authToken) {
-                document.getElementById('available-plugins-list').innerHTML =
-                    '<div class="error">Please authenticate first</div>';
-                return;
-            }
-
-            try {
-                const response = await fetch('/api/plugins/available', {
-                    headers: { 'Authorization': 'Bearer ' + authToken }
-                });
-
-                if (!response.ok) throw new Error('Failed to load available plugins');
-
-                const packages = await response.json();
-                const list = document.getElementById('available-plugins-list');
-
-                if (packages.length === 0) {
-                    list.innerHTML = '<div class="empty-state">No plugins available in the registry.</div>';
-                    return;
-                }
-
-                // Fetch latest version for each plugin
-                const pluginsWithVersions = await Promise.all(
-                    packages.map(async (name) => {
-                        try {
-                            const tagsResponse = await fetch(`/api/plugins/${name}/tags`, {
-                                headers: { 'Authorization': 'Bearer ' + authToken }
-                            });
-
-                            if (!tagsResponse.ok) {
-                                return { name, version: 'unknown' };
-                            }
-
-                            const tagsData = await tagsResponse.json();
-                            const tags = tagsData.tags || [];
-
-                            if (tags.length === 0) {
-                                return { name, version: 'unknown' };
-                            }
-
-                            // Sort tags semantically and get the latest
-                            const sortedTags = tags.sort((a, b) => {
-                                const aParts = a.split('.').map(Number);
-                                const bParts = b.split('.').map(Number);
-                                for (let i = 0; i < Math.max(aParts.length, bParts.length); i++) {
-                                    const aVal = aParts[i] || 0;
-                                    const bVal = bParts[i] || 0;
-                                    if (aVal !== bVal) return bVal - aVal;
-                                }
-                                return 0;
-                            });
-
-                            return { name, version: sortedTags[0] || 'unknown' };
-                        } catch (err) {
-                            console.error(`Error fetching tags for ${name}:`, err);
-                            return { name, version: 'unknown' };
-                        }
-                    })
-                );
-
-                // Render table with versions
-                list.innerHTML = '<table><thead><tr><th>Name</th><th>Latest Version</th><th>Actions</th></tr></thead><tbody>' +
-                    pluginsWithVersions.map(plugin => `<tr>
-                        <td><strong>${plugin.name}</strong></td>
-                        <td><span style="color: #6b7280; font-family: monospace;">${plugin.version}</span></td>
-                        <td>
-                            <button onclick="showInstallPluginForm('${plugin.name}')" class="btn btn-sm" style="background: #10b981;">Install</button>
-                        </td>
-                    </tr>`).join('') +
-                    '</tbody></table>';
-
-            } catch (err) {
-                console.error('Error loading available plugins:', err);
-                document.getElementById('available-plugins-list').innerHTML =
-                    '<div class="error">Failed to load available plugins. Make sure the registry is accessible.</div>';
-            }
-        }
-
-        async function showInstallPluginForm(name) {
-            // Fetch available tags from the registry
-            let defaultVersion = '1.0.0';
-            let availableVersions = [];
-
-            try {
-                const response = await fetch(`/api/plugins/${name}/tags`, {
-                    headers: { 'Authorization': 'Bearer ' + authToken }
-                });
-
-                if (response.ok) {
-                    const data = await response.json();
-                    availableVersions = data.tags || [];
-
-                    // Sort versions semantically and pick the latest
-                    if (availableVersions.length > 0) {
-                        defaultVersion = availableVersions.sort((a, b) => {
-                            const aParts = a.split('.').map(Number);
-                            const bParts = b.split('.').map(Number);
-                            for (let i = 0; i < Math.max(aParts.length, bParts.length); i++) {
-                                const aVal = aParts[i] || 0;
-                                const bVal = bParts[i] || 0;
-                                if (aVal !== bVal) return bVal - aVal; // Descending order
-                            }
-                            return 0;
-                        })[0];
-                    }
-                }
-            } catch (err) {
-                console.warn('Failed to fetch tags for plugin:', err);
-            }
-
-            const versionList = availableVersions.length > 0
-                ? `\n\nAvailable versions: ${availableVersions.join(', ')}`
-                : '';
-
-            const version = prompt(`Enter version to install for "${name}":${versionList}`, defaultVersion);
-            if (!version) return;
-
-            installPlugin(name, version);
-        }
-
-        function installPlugin(name, version) {
-            if (!confirm(`Install plugin "${name}" version "${version}"?\n\nNote: You will need to restart the drakeify proxy after installation.`)) {
-                return;
-            }
-
-            fetch('/api/plugins/install', {
-                method: 'POST',
-                headers: {
-                    'Authorization': 'Bearer ' + authToken,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({ name, version })
-            })
-            .then(r => {
-                if (!r.ok) throw new Error('Installation failed');
-                return r.json();
-            })
-            .then(() => {
-                alert(`Plugin "${name}" installed successfully!\n\nPlease restart the drakeify proxy to enable the plugin.`);
-                loadInstalledPlugins();
-                loadAvailablePlugins();
-            })
-            .catch(err => {
-                console.error('Error installing plugin:', err);
-                alert('Failed to install plugin. Check the console for details.');
-            });
-        }
-
-        function uninstallPlugin(name) {
-            if (!confirm(`Uninstall plugin "${name}"?\n\nNote: You will need to restart the drakeify proxy after uninstallation.`)) {
-                return;
-            }
-
-            fetch(`/api/plugins/${name}`, {
-                method: 'DELETE',
-                headers: { 'Authorization': 'Bearer ' + authToken }
-            })
-            .then(r => {
-                if (!r.ok) throw new Error('Uninstall failed');
-                alert(`Plugin "${name}" uninstalled successfully!\n\nPlease restart the drakeify proxy to apply changes.`);
-                loadInstalledPlugins();
-            })
-            .catch(err => {
-                console.error('Error uninstalling plugin:', err);
-                alert('Failed to uninstall plugin');
-            });
-        }
-
-        async function showPluginConfigModal(pluginName) {
-            try {
-                // Fetch metadata and current config in parallel
-                const [metadataRes, configRes] = await Promise.all([
-                    fetch(`/api/plugins/${pluginName}/metadata`, {
-                        headers: { 'Authorization': 'Bearer ' + authToken }
-                    }),
-                    fetch(`/api/plugins/${pluginName}/config`, {
-                        headers: { 'Authorization': 'Bearer ' + authToken }
-                    })
-                ]);
-
-                const metadata = metadataRes.ok ? await metadataRes.json() : {};
-                const config = configRes.ok ? await configRes.json() : {};
-
-                const configSchema = metadata.config_schema || {};
-                const secretsSchema = metadata.secrets_schema || {};
-
-                // Build form HTML
-                let formHtml = '';
-
-                // Configuration fields
-                if (Object.keys(configSchema).length > 0) {
-                    formHtml += '<h3 style="color: #f1f5f9; margin-top: 0;">Configuration</h3>';
-                    for (const [key, schema] of Object.entries(configSchema)) {
-                        const value = config[key] !== undefined ? config[key] : schema.default;
-                        const required = schema.required ? ' *' : '';
-
-                        formHtml += `
-                            <div style="margin-bottom: 1rem;">
-                                <label style="display: block; color: #cbd5e1; margin-bottom: 0.25rem; font-size: 14px;">
-                                    ${key}${required}
-                                </label>
-                                <div style="color: #94a3b8; font-size: 12px; margin-bottom: 0.5rem;">${schema.description || ''}</div>
-                                ${generateFormField(key, schema, value)}
-                            </div>
-                        `;
-                    }
-                } else {
-                    formHtml += '<p style="color: #94a3b8;">No configuration fields defined for this plugin.</p>';
-                }
-
-                // Secrets fields
-                if (Object.keys(secretsSchema).length > 0) {
-                    formHtml += '<h3 style="color: #f1f5f9; margin-top: 1.5rem; border-top: 1px solid #334155; padding-top: 1rem;">Secrets</h3>';
-                    formHtml += '<p style="color: #94a3b8; font-size: 12px; margin-bottom: 1rem;">⚠️ Secrets are stored separately and securely. They are not shown here.</p>';
-                    for (const [key, schema] of Object.entries(secretsSchema)) {
-                        const required = schema.required ? ' *' : '';
-                        formHtml += `
-                            <div style="margin-bottom: 1rem;">
-                                <label style="display: block; color: #cbd5e1; margin-bottom: 0.25rem; font-size: 14px;">
-                                    ${key}${required}
-                                </label>
-                                <div style="color: #94a3b8; font-size: 12px; margin-bottom: 0.5rem;">${schema.description || ''}</div>
-                                <input type="password" data-secret-key="${key}" placeholder="Enter secret value (leave empty to keep current)" style="width: 100%; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; padding: 0.5rem; font-size: 14px;" />
-                            </div>
-                        `;
-                    }
-                }
-
-                // Show modal
-                const modal = document.createElement('div');
-                modal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); display: flex; align-items: center; justify-content: center; z-index: 1000;';
-                modal.innerHTML = `
-                    <div style="background: #1e293b; padding: 2rem; border-radius: 12px; max-width: 700px; width: 90%; max-height: 80vh; overflow: auto;">
-                        <h2 style="margin-top: 0; color: #f1f5f9;">Configure: ${pluginName}</h2>
-                        <form id="plugin-config-form">
-                            ${formHtml}
-                        </form>
-                        <div style="margin-top: 1.5rem; display: flex; gap: 0.5rem; justify-content: flex-end; border-top: 1px solid #334155; padding-top: 1rem;">
-                            <button type="button" onclick="this.closest('div').parentElement.remove()" class="btn" style="background: #64748b;">Cancel</button>
-                            <button type="button" onclick="savePluginConfig('${pluginName}')" class="btn" style="background: #10b981;">Save</button>
-                        </div>
-                    </div>
-                `;
-                document.body.appendChild(modal);
-
-                // Close on background click
-                modal.addEventListener('click', (e) => {
-                    if (e.target === modal) modal.remove();
-                });
-
-            } catch (err) {
-                console.error('Error loading plugin config:', err);
-                alert('Failed to load plugin configuration');
-            }
-        }
-
-        function generateFormField(key, schema, value) {
-            const inputStyle = 'width: 100%; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; padding: 0.5rem; font-size: 14px;';
-
-            switch (schema.type) {
-                case 'boolean':
-                    return `<input type="checkbox" data-config-key="${key}" ${value ? 'checked' : ''} style="width: auto; height: 20px; cursor: pointer;" />`;
-                case 'number':
-                    return `<input type="number" data-config-key="${key}" value="${value !== undefined ? value : ''}" style="${inputStyle}" />`;
-                case 'array':
-                case 'object':
-                    return `<textarea data-config-key="${key}" rows="5" style="${inputStyle}">${JSON.stringify(value, null, 2)}</textarea>`;
-                case 'string':
-                default:
-                    return `<input type="text" data-config-key="${key}" value="${value !== undefined ? value : ''}" style="${inputStyle}" />`;
-            }
-        }
-
-        async function savePluginConfig(pluginName) {
-            try {
-                const form = document.getElementById('plugin-config-form');
-                const config = {};
-
-                // Collect config values from form
-                form.querySelectorAll('[data-config-key]').forEach(input => {
-                    const key = input.getAttribute('data-config-key');
-                    let value;
-
-                    if (input.type === 'checkbox') {
-                        value = input.checked;
-                    } else if (input.type === 'number') {
-                        value = input.value ? parseFloat(input.value) : undefined;
-                    } else if (input.tagName === 'TEXTAREA') {
-                        // Parse JSON for arrays/objects
-                        try {
-                            value = JSON.parse(input.value);
-                        } catch (e) {
-                            throw new Error(`Invalid JSON in field "${key}"`);
-                        }
-                    } else {
-                        value = input.value;
-                    }
-
-                    if (value !== undefined && value !== '') {
-                        config[key] = value;
-                    }
-                });
-
-                // Save config to server
-                const configResponse = await fetch(`/api/plugins/${pluginName}/config`, {
-                    method: 'PUT',
-                    headers: {
-                        'Authorization': 'Bearer ' + authToken,
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify(config)
-                });
-
-                if (!configResponse.ok) throw new Error('Failed to save config');
-
-                // Save secrets
-                const secrets = {};
-                form.querySelectorAll('[data-secret-key]').forEach(input => {
-                    const key = input.getAttribute('data-secret-key');
-                    const value = input.value;
-                    if (value) {
-                        secrets[key] = value;
-                    }
-                });
-
-                // Save each secret individually
-                const secretPromises = Object.entries(secrets).map(([key, value]) =>
-                    fetch(`/api/secrets/${encodeURIComponent(key)}`, {
-                        method: 'PUT',
-                        headers: {
-                            'Authorization': 'Bearer ' + authToken,
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify({ value })
-                    })
-                );
-
-                if (secretPromises.length > 0) {
-                    const secretResults = await Promise.all(secretPromises);
-                    const failedSecrets = secretResults.filter(r => !r.ok);
-
-                    if (failedSecrets.length > 0) {
-                        throw new Error(`Failed to save ${failedSecrets.length} secret(s)`);
-                    }
-
-                    alert(`✓ Configuration and ${Object.keys(secrets).length} secret(s) for "${pluginName}" saved successfully!\n\nPlease restart the drakeify proxy for changes to take effect.`);
-                } else {
-                    alert(`✓ Configuration for "${pluginName}" saved successfully!\n\nPlease restart the drakeify proxy for changes to take effect.`);
-                }
-
-                // Close modal
-                form.closest('div').parentElement.remove();
-
-            } catch (err) {
-                console.error('Error saving plugin config:', err);
-                alert(`Failed to save configuration: ${err.message}`);
-            }
-        }
-
-        function loadUnpublishedPlugins() {
-            if (!authToken) {
-                document.getElementById('publish-plugins-list').innerHTML =
-                    '<div class="error">Please authenticate first</div>';
-                return;
-            }
-
-            fetch('/api/plugins/unpublished', {
-                headers: { 'Authorization': 'Bearer ' + authToken }
-            })
-            .then(r => {
-                if (!r.ok) throw new Error('Failed to load unpublished plugins');
-                return r.json();
-            })
-            .then(plugins => {
-                const list = document.getElementById('publish-plugins-list');
-                if (plugins.length === 0) {
-                    list.innerHTML = '<div class="empty-state">No unpublished plugins found in /data/plugins/.<br><br>Plugins must have a metadata.json file to be publishable.</div>';
-                } else {
-                    list.innerHTML = '<table><thead><tr><th>Name</th><th>Version</th><th>Description</th><th>Path</th><th>Actions</th></tr></thead><tbody>' +
-                        plugins.map(p => `<tr>
-                            <td><strong>${p.name}</strong></td>
-                            <td>${p.version}</td>
-                            <td>${p.description}</td>
-                            <td><code style="font-size: 0.875rem;">${p.path}</code></td>
-                            <td>
-                                <button onclick="publishPlugin('${p.path}')" class="btn btn-sm" style="background: #8b5cf6;">Publish</button>
-                            </td>
-                        </tr>`).join('') +
-                        '</tbody></table>';
-                }
-            })
-            .catch(err => {
-                console.error('Error loading unpublished plugins:', err);
-                document.getElementById('publish-plugins-list').innerHTML =
-                    '<div class="error">Failed to load unpublished plugins.</div>';
-            });
-        }
-
-        function publishPlugin(path) {
-            if (!confirm(`Publish plugin from "${path}" to the registry?\n\nThis will make it available for installation.`)) {
-                return;
-            }
-
-            fetch('/api/plugins/publish', {
-                method: 'POST',
-                headers: {
-                    'Authorization': 'Bearer ' + authToken,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({ path })
-            })
-            .then(r => {
-                if (!r.ok) throw new Error('Publish failed');
-                return r.json();
-            })
-            .then(result => {
-                alert(`✓ Plugin "${result.name}" version ${result.version} published successfully!\n\nDigest: ${result.digest}`);
-                loadUnpublishedPlugins();
-                loadAvailablePlugins();
-            })
-            .catch(err => {
-                console.error('Error publishing plugin:', err);
-                alert('Failed to publish plugin. Check the console for details.');
-            });
-        }
-
-        // ============================================================================
-        // TOOL MANAGER VIEW
-        // ============================================================================
-
-        function loadToolManagerView() {
-            const container = document.getElementById('view-container');
-            container.innerHTML = `
-                <div class="view-header">
-                    <h2>🛠️ Tool Manager</h2>
-                    <p style="color: #94a3b8;">Manage tools for LLM function calling</p>
-                </div>
-
-                <div class="plugin-manager">
-                    <div class="plugin-tabs" style="border-bottom: 2px solid #334155; margin-bottom: 2rem;">
-                        <button id="tab-installed-tools" onclick="showToolTab('installed')" class="tool-tab active" style="padding: 0.75rem 1.5rem; background: none; border: none; color: #3b82f6; font-weight: 600; cursor: pointer; border-bottom: 2px solid #3b82f6; margin-bottom: -2px;">
-                            Installed
-                        </button>
-                        <button id="tab-available-tools" onclick="showToolTab('available')" class="tool-tab" style="padding: 0.75rem 1.5rem; background: none; border: none; color: #94a3b8; font-weight: 600; cursor: pointer; margin-bottom: -2px;">
-                            Available
-                        </button>
-                        <button id="tab-publish-tools" onclick="showToolTab('publish')" class="tool-tab" style="padding: 0.75rem 1.5rem; background: none; border: none; color: #94a3b8; font-weight: 600; cursor: pointer; margin-bottom: -2px;">
-                            Publish
-                        </button>
-                    </div>
-
-                    <!-- Installed Tools Tab -->
-                    <div id="installed-tools-tab" class="tool-tab-content">
-                        <div id="installed-tools-list">
-                            <div class="loading">Loading installed tools...</div>
-                        </div>
-                    </div>
-
-                    <!-- Available Tools Tab -->
-                    <div id="available-tools-tab" class="tool-tab-content" style="display: none;">
-                        <div id="available-tools-list">
-                            <div class="loading">Loading available tools...</div>
-                        </div>
-                    </div>
-
-                    <!-- Publish Tools Tab -->
-                    <div id="publish-tools-tab" class="tool-tab-content" style="display: none;">
-                        <div id="publish-tools-list">
-                            <div class="loading">Loading unpublished tools...</div>
-                        </div>
-                    </div>
-                </div>
-            `;
-
-            // Load all tabs
-            loadInstalledTools();
-            loadAvailableTools();
-            loadUnpublishedTools();
-        }
-
-        function showToolTab(tabName) {
-            // Update tab buttons
-            document.querySelectorAll('.tool-tab').forEach(tab => {
-                tab.style.color = '#94a3b8';
-                tab.style.borderBottom = 'none';
-            });
-            const activeTab = document.getElementById(`tab-${tabName}-tools`);
-            if (activeTab) {
-                activeTab.style.color = '#3b82f6';
-                activeTab.style.borderBottom = '2px solid #3b82f6';
-            }
-
-            // Show/hide tab content
-            document.querySelectorAll('.tool-tab-content').forEach(content => {
-                content.style.display = 'none';
-            });
-            document.getElementById(`${tabName}-tools-tab`).style.display = 'block';
-        }
-
-        function loadInstalledTools() {
-            if (!authToken) {
-                document.getElementById('installed-tools-list').innerHTML =
-                    '<div class="error">Please authenticate first</div>';
-                return;
-            }
-
-            fetch('/api/tools', {
-                headers: { 'Authorization': 'Bearer ' + authToken }
-            })
-            .then(r => {
-                if (!r.ok) throw new Error('Failed to load tools');
-                return r.json();
-            })
-            .then(tools => {
-                const list = document.getElementById('installed-tools-list');
-                if (tools.length === 0) {
-                    list.innerHTML = '<div class="empty-state">No tools installed. Switch to the "Available" tab to install tools.</div>';
-                } else {
-                    list.innerHTML = '<table><thead><tr><th>Name</th><th>Version</th><th>Description</th><th>Author</th><th>Actions</th></tr></thead><tbody>' +
-                        tools.map(t => `<tr>
-                            <td><strong>${t.name}</strong></td>
-                            <td>${t.version}</td>
-                            <td>${t.description}</td>
-                            <td>${t.author || 'Unknown'}</td>
-                            <td>
-                                <button onclick="showToolConfigModal('${t.name}')" class="btn btn-sm" style="background: #3b82f6;">Configure</button>
-                                <button onclick="uninstallTool('${t.name}')" class="btn btn-sm" style="background: #ef4444;">Uninstall</button>
-                            </td>
-                        </tr>`).join('') +
-                        '</tbody></table>' +
-                        '<div style="margin-top: 1rem; padding: 1rem; background: #334155; border-radius: 8px; color: #94a3b8;">' +
-                        '<strong>⚠️ Note:</strong> After installing or uninstalling tools, you must restart the drakeify proxy for changes to take effect.' +
-                        '</div>';
-                }
-            })
-            .catch(err => {
-                console.error('Error loading installed tools:', err);
-                document.getElementById('installed-tools-list').innerHTML =
-                    '<div class="error">Failed to load installed tools</div>';
-            });
-        }
-
-        async function loadAvailableTools() {
-            if (!authToken) {
-                document.getElementById('available-tools-list').innerHTML =
-                    '<div class="error">Please authenticate first</div>';
-                return;
-            }
-
-            try {
-                const response = await fetch('/api/tools/available', {
-                    headers: { 'Authorization': 'Bearer ' + authToken }
-                });
-
-                if (!response.ok) throw new Error('Failed to load available tools');
-
-                const packages = await response.json();
-                const list = document.getElementById('available-tools-list');
-
-                if (packages.length === 0) {
-                    list.innerHTML = '<div class="empty-state">No tools available in the registry.</div>';
-                    return;
-                }
-
-                // Fetch latest version for each tool
-                const toolsWithVersions = await Promise.all(
-                    packages.map(async (name) => {
-                        try {
-                            const tagsResponse = await fetch(`/api/tools/${name}/tags`, {
-                                headers: { 'Authorization': 'Bearer ' + authToken }
-                            });
-
-                            if (!tagsResponse.ok) {
-                                return { name, version: 'unknown' };
-                            }
-
-                            const tagsData = await tagsResponse.json();
-                            const tags = tagsData.tags || [];
-                            const latestTag = tags.length > 0 ? tags[tags.length - 1] : 'unknown';
-
-                            return { name, version: latestTag };
-                        } catch (err) {
-                            console.error(`Error fetching tags for ${name}:`, err);
-                            return { name, version: 'unknown' };
-                        }
-                    })
-                );
-
-                // Render table with versions
-                list.innerHTML = '<table><thead><tr><th>Name</th><th>Latest Version</th><th>Actions</th></tr></thead><tbody>' +
-                    toolsWithVersions.map(tool => `<tr>
-                        <td><strong>${tool.name}</strong></td>
-                        <td><span style="color: #6b7280; font-family: monospace;">${tool.version}</span></td>
-                        <td>
-                            <button onclick="showInstallToolForm('${tool.name}')" class="btn btn-sm" style="background: #10b981;">Install</button>
-                        </td>
-                    </tr>`).join('') +
-                    '</tbody></table>';
-
-            } catch (err) {
-                console.error('Error loading available tools:', err);
-                document.getElementById('available-tools-list').innerHTML =
-                    '<div class="error">Failed to load available tools. Make sure the registry is accessible.</div>';
-            }
-        }
-
-        async function showInstallToolForm(name) {
-            // Fetch available tags from the registry
-            let defaultVersion = '1.0.0';
-            let availableVersions = [];
-
-            try {
-                const response = await fetch(`/api/tools/${name}/tags`, {
-                    headers: { 'Authorization': 'Bearer ' + authToken }
-                });
-
-                if (response.ok) {
-                    const data = await response.json();
-                    if (data.tags && data.tags.length > 0) {
-                        availableVersions = data.tags;
-                        defaultVersion = data.tags[data.tags.length - 1]; // Latest version
-                    }
-                }
-            } catch (err) {
-                console.error('Error fetching tool tags:', err);
-            }
-
-            const versionOptions = availableVersions.length > 0
-                ? availableVersions.map(v => `<option value="${v}">${v}</option>`).join('')
-                : `<option value="${defaultVersion}">${defaultVersion}</option>`;
-
-            const version = prompt(`Install tool "${name}".\n\nEnter version (available: ${availableVersions.join(', ') || defaultVersion}):`, defaultVersion);
-            if (version) {
-                installTool(name, version);
-            }
-        }
-
-        function installTool(name, version) {
-            if (!confirm(`Install tool "${name}" version "${version}"?\n\nNote: You will need to restart the drakeify proxy after installation.`)) {
-                return;
-            }
-
-            fetch('/api/tools/install', {
-                method: 'POST',
-                headers: {
-                    'Authorization': 'Bearer ' + authToken,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({ name, version })
-            })
-            .then(r => {
-                if (!r.ok) throw new Error('Installation failed');
-                return r.json();
-            })
-            .then(() => {
-                alert(`Tool "${name}" installed successfully!\n\nPlease restart the drakeify proxy to enable the tool.`);
-                loadInstalledTools();
-                loadAvailableTools();
-            })
-            .catch(err => {
-                console.error('Error installing tool:', err);
-                alert('Failed to install tool. Check the console for details.');
-            });
-        }
-
-        function uninstallTool(name) {
-            if (!confirm(`Uninstall tool "${name}"?\n\nNote: You will need to restart the drakeify proxy after uninstallation.`)) {
-                return;
-            }
-
-            fetch(`/api/tools/${name}`, {
-                method: 'DELETE',
-                headers: { 'Authorization': 'Bearer ' + authToken }
-            })
-            .then(r => {
-                if (!r.ok) throw new Error('Uninstall failed');
-                alert(`Tool "${name}" uninstalled successfully!\n\nPlease restart the drakeify proxy to apply changes.`);
-                loadInstalledTools();
-            })
-            .catch(err => {
-                console.error('Error uninstalling tool:', err);
-                alert('Failed to uninstall tool');
-            });
-        }
-
-        // Helper function to render configuration form fields
-        function renderConfigForm(configSchema, currentConfig) {
-            let html = '';
-            for (const [key, schema] of Object.entries(configSchema)) {
-                const value = currentConfig[key] !== undefined ? currentConfig[key] : schema.default;
-                const required = schema.required ? ' *' : '';
-
-                html += `
-                    <div style="margin-bottom: 1rem;">
-                        <label style="display: block; color: #cbd5e1; margin-bottom: 0.25rem; font-size: 14px;">
-                            ${key}${required}
-                        </label>
-                        <div style="color: #94a3b8; font-size: 12px; margin-bottom: 0.5rem;">${schema.description || ''}</div>
-                        ${generateFormField(key, schema, value)}
-                    </div>
-                `;
-            }
-            return html;
-        }
-
-        // Helper function to render secrets form fields
-        function renderSecretsForm(secretsSchema) {
-            let html = '';
-            for (const [key, schema] of Object.entries(secretsSchema)) {
-                const required = schema.required ? ' *' : '';
-                html += `
-                    <div style="margin-bottom: 1rem;">
-                        <label style="display: block; color: #cbd5e1; margin-bottom: 0.25rem; font-size: 14px;">
-                            ${key}${required}
-                        </label>
-                        <div style="color: #94a3b8; font-size: 12px; margin-bottom: 0.5rem;">${schema.description || ''}</div>
-                        <input type="password" data-secret-key="${key}" placeholder="Enter secret value (leave empty to keep current)" style="width: 100%; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; padding: 0.5rem; font-size: 14px;" />
-                    </div>
-                `;
-            }
-            return html;
-        }
-
-        async function showToolConfigModal(toolName) {
-            try {
-                // Fetch metadata and current config in parallel
-                const [metadataRes, configRes] = await Promise.all([
-                    fetch(`/api/tools/${toolName}/metadata`, {
-                        headers: { 'Authorization': 'Bearer ' + authToken }
-                    }),
-                    fetch(`/api/tools/${toolName}/config`, {
-                        headers: { 'Authorization': 'Bearer ' + authToken }
-                    })
-                ]);
-
-                const metadata = metadataRes.ok ? await metadataRes.json() : {};
-                const currentConfig = configRes.ok ? await configRes.json() : {};
-
-                // Build configuration form
-                const configSchema = metadata.config_schema || {};
-                const secretsSchema = metadata.secrets_schema || {};
-
-                let formHtml = `<h3>Configure ${toolName}</h3>`;
-
-                // Configuration fields
-                if (Object.keys(configSchema).length > 0) {
-                    formHtml += '<h4 style="margin-top: 1.5rem; color: #3b82f6;">Configuration</h4>';
-                    formHtml += renderConfigForm(configSchema, currentConfig);
-                }
-
-                // Secrets fields
-                if (Object.keys(secretsSchema).length > 0) {
-                    formHtml += '<h4 style="margin-top: 1.5rem; color: #f59e0b;">Secrets</h4>';
-                    formHtml += '<p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">Secrets are stored securely and never displayed after saving.</p>';
-                    formHtml += renderSecretsForm(secretsSchema);
-                }
-
-                if (Object.keys(configSchema).length === 0 && Object.keys(secretsSchema).length === 0) {
-                    formHtml += '<p style="color: #94a3b8;">This tool has no configurable options.</p>';
-                }
-
-                // Show modal
-                const modal = document.createElement('div');
-                modal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); display: flex; align-items: center; justify-content: center; z-index: 1000;';
-                modal.innerHTML = `
-                    <div style="background: #1e293b; padding: 2rem; border-radius: 12px; max-width: 700px; width: 90%; max-height: 80vh; overflow: auto;">
-                        <h2 style="margin-top: 0; color: #f1f5f9;">Configure: ${toolName}</h2>
-                        <form id="tool-config-form">
-                            ${formHtml}
-                        </form>
-                        <div style="margin-top: 1.5rem; display: flex; gap: 0.5rem; justify-content: flex-end; border-top: 1px solid #334155; padding-top: 1rem;">
-                            <button type="button" onclick="this.closest('div').parentElement.remove()" class="btn" style="background: #64748b;">Cancel</button>
-                            <button type="button" onclick="saveToolConfig('${toolName}')" class="btn" style="background: #10b981;">Save</button>
-                        </div>
-                    </div>
-                `;
-                document.body.appendChild(modal);
-
-                // Close on background click
-                modal.addEventListener('click', (e) => {
-                    if (e.target === modal) modal.remove();
-                });
-            } catch (err) {
-                console.error('Error loading tool config:', err);
-                alert('Failed to load tool configuration');
-            }
-        }
-
-        async function saveToolConfig(toolName) {
-            try {
-                // Collect configuration values
-                const config = {};
-                document.querySelectorAll('[data-config-key]').forEach(input => {
-                    const key = input.getAttribute('data-config-key');
-                    let value = input.value;
-
-                    // Type conversion
-                    if (input.type === 'number') {
-                        value = parseFloat(value);
-                    } else if (input.type === 'checkbox') {
-                        value = input.checked;
-                    } else if (input.getAttribute('data-type') === 'array') {
-                        value = value.split(',').map(v => v.trim()).filter(v => v);
-                    } else if (input.getAttribute('data-type') === 'object') {
-                        try {
-                            value = JSON.parse(value);
-                        } catch (e) {
-                            alert(`Invalid JSON for field "${key}"`);
-                            return;
-                        }
-                    }
-
-                    // Only include non-empty values
-                    if (value !== '' && value !== null && value !== undefined) {
-                        config[key] = value;
-                    }
-                });
-
-                // Save config to server
-                const configResponse = await fetch(`/api/tools/${toolName}/config`, {
-                    method: 'PUT',
-                    headers: {
-                        'Authorization': 'Bearer ' + authToken,
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify(config)
-                });
-
-                if (!configResponse.ok) {
-                    throw new Error('Failed to save configuration');
-                }
-
-                // Collect and save secrets
-                const secretInputs = document.querySelectorAll('[data-secret-key]');
-                const secretPromises = [];
-
-                secretInputs.forEach(input => {
-                    const key = input.getAttribute('data-secret-key');
-                    const value = input.value;
-
-                    if (value && value.trim()) {
-                        secretPromises.push(
-                            fetch(`/api/secrets/${key}`, {
-                                method: 'PUT',
-                                headers: {
-                                    'Authorization': 'Bearer ' + authToken,
-                                    'Content-Type': 'application/json'
-                                },
-                                body: JSON.stringify({ value: value.trim() })
-                            })
-                        );
-                    }
-                });
-
-                if (secretPromises.length > 0) {
-                    await Promise.all(secretPromises);
-                }
-
-                alert(`✓ Configuration and ${secretPromises.length} secret(s) for "${toolName}" saved successfully!`);
-
-                // Close the modal
-                const modal = document.querySelector('div[style*="position: fixed"]');
-                if (modal) modal.remove();
-
-                loadInstalledTools();
-            } catch (err) {
-                console.error('Error saving tool config:', err);
-                alert(`Failed to save configuration: ${err.message}`);
-            }
-        }
-
-        function loadUnpublishedTools() {
-            if (!authToken) {
-                document.getElementById('publish-tools-list').innerHTML =
-                    '<div class="error">Please authenticate first</div>';
-                return;
-            }
-
-            fetch('/api/tools/unpublished', {
-                headers: { 'Authorization': 'Bearer ' + authToken }
-            })
-            .then(r => {
-                if (!r.ok) throw new Error('Failed to load unpublished tools');
-                return r.json();
-            })
-            .then(tools => {
-                const list = document.getElementById('publish-tools-list');
-                if (tools.length === 0) {
-                    list.innerHTML = '<div class="empty-state">No unpublished tools found in /data/tools/.<br><br>Tools must have a metadata.json file to be publishable.</div>';
-                } else {
-                    list.innerHTML = '<table><thead><tr><th>Name</th><th>Version</th><th>Description</th><th>Path</th><th>Actions</th></tr></thead><tbody>' +
-                        tools.map(t => `<tr>
-                            <td><strong>${t.name}</strong></td>
-                            <td>${t.version}</td>
-                            <td>${t.description}</td>
-                            <td><code style="font-size: 0.875rem;">${t.path}</code></td>
-                            <td>
-                                <button onclick="publishTool('${t.path}')" class="btn btn-sm" style="background: #8b5cf6;">Publish</button>
-                            </td>
-                        </tr>`).join('') +
-                        '</tbody></table>';
-                }
-            })
-            .catch(err => {
-                console.error('Error loading unpublished tools:', err);
-                document.getElementById('publish-tools-list').innerHTML =
-                    '<div class="error">Failed to load unpublished tools.</div>';
-            });
-        }
-
-        function publishTool(path) {
-            if (!confirm(`Publish tool from "${path}" to the registry?\n\nThis will make it available for installation.`)) {
-                return;
-            }
-
-            fetch('/api/tools/publish', {
-                method: 'POST',
-                headers: {
-                    'Authorization': 'Bearer ' + authToken,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({ path })
-            })
-            .then(r => {
-                if (!r.ok) throw new Error('Publish failed');
-                return r.json();
-            })
-            .then(result => {
-                alert(`✓ Tool "${result.name}" version ${result.version} published successfully!\n\nDigest: ${result.digest}`);
-                loadUnpublishedTools();
-                loadAvailableTools();
-            })
-            .catch(err => {
-                console.error('Error publishing tool:', err);
-                alert('Failed to publish tool. Check the console for details.');
-            });
-        }
-
-        // Show login form
-        function showLoginForm() {
-            const existingForm = document.getElementById('login-form');
-            if (existingForm) return; // Already showing
-
-            const loginForm = document.createElement('div');
-            loginForm.id = 'login-form';
-            loginForm.style.cssText = 'margin-top: 1rem; padding: 1rem; background: #334155; border-radius: 8px;';
-            loginForm.innerHTML = `
-                <label style="display: block; margin-bottom: 0.5rem; font-weight: 500;">Authentication Token:</label>
-                <div style="display: flex; gap: 0.5rem;">
-                    <input type="password" id="token-input" placeholder="Enter your token"
-                           style="flex: 1; padding: 0.5rem; border: 1px solid #475569; border-radius: 6px; background: #1e293b; color: #e2e8f0; font-family: monospace;">
-                    <button onclick="submitToken()" class="btn btn-primary">Login</button>
-                </div>
-            `;
-
-            // Insert at the top of the content area
-            const viewContainer = document.getElementById('view-container');
-            viewContainer.insertBefore(loginForm, viewContainer.firstChild);
-            document.getElementById('token-input').focus();
-
-            // Allow Enter key to submit
-            document.getElementById('token-input').addEventListener('keypress', (e) => {
-                if (e.key === 'Enter') submitToken();
-            });
-        }
-
-        // Submit token
-        function submitToken() {
-            const input = document.getElementById('token-input');
-            const token = input.value.trim();
-            if (token) {
-                authToken = token;
-                localStorage.setItem('drakeify_token', token);
-                document.getElementById('login-form').remove();
-                loadConfigs();
-                connectWebSocket(); // Connect WebSocket after authentication
-            }
-        }
-
-        // WebSocket connection for live updates
-        let ws = null;
-        const statusEl = document.getElementById('ws-status');
-
-        function connectWebSocket() {
-            const token = localStorage.getItem('drakeify_token');
-            if (!token) {
-                statusEl.textContent = '● Not authenticated';
-                statusEl.style.background = '#64748b';
-                return;
-            }
-
-            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            // Include token as query parameter for WebSocket auth
-            ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws?token=${encodeURIComponent(token)}`);
-
-            ws.onopen = () => {
-                statusEl.textContent = '● Connected';
-                statusEl.style.background = '#10b981';
-            };
-
-            ws.onclose = () => {
-                statusEl.textContent = '● Disconnected';
-                statusEl.style.background = '#ef4444';
-                // Try to reconnect after 5 seconds
-                setTimeout(connectWebSocket, 5000);
-            };
-
-            ws.onerror = () => {
-                statusEl.textContent = '● Error';
-                statusEl.style.background = '#f59e0b';
-            };
-
-            ws.onmessage = (event) => {
-                const update = JSON.parse(event.data);
-                console.log('WebSocket update:', update);
-
-                // Refresh the appropriate list based on update type
-                switch (update.type) {
-                    case 'LlmConfigCreated':
-                    case 'LlmConfigUpdated':
-                    case 'LlmConfigDeleted':
-                        // Only reload configs if we're on the LLM config page
-                        if (document.getElementById('config-list')) {
-                            loadConfigs();
-                        }
-                        break;
-                    case 'PluginInstalled':
-                    case 'PluginUninstalled':
-                        // Reload plugin lists if they exist
-                        if (typeof loadInstalledPlugins === 'function') {
-                            loadInstalledPlugins();
-                        }
-                        if (typeof loadAvailablePlugins === 'function') {
-                            loadAvailablePlugins();
-                        }
-                        break;
-                    case 'ToolInstalled':
-                    case 'ToolUninstalled':
-                        // Reload tool lists if they exist
-                        if (typeof loadInstalledTools === 'function') {
-                            loadInstalledTools();
-                        }
-                        if (typeof loadAvailableTools === 'function') {
-                            loadAvailableTools();
-                        }
-                        break;
-                }
-            };
         }
 
         // ============================================================================

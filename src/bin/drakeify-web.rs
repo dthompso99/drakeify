@@ -129,6 +129,9 @@ async fn main() -> Result<()> {
         .route("/tools/install", post(install_tool))
         .route("/tools/publish", post(publish_tool))
         .route("/tools/:name", delete(uninstall_tool))
+        // Session endpoints
+        .route("/sessions", get(list_sessions))
+        .route("/sessions/:session_id", get(get_session))
         // Secrets endpoints
         .route("/secrets/:key", get(get_secret))
         .route("/secrets/:key", put(set_secret))
@@ -210,6 +213,109 @@ async fn auth_middleware(
     }
 
     Ok(next.run(request).await)
+}
+
+// ============================================================================
+// Session API Handlers  
+// ============================================================================
+
+/// Get a specific session 
+async fn get_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    // Extract account ID from query parameters
+    let account_id = params.get("account_id").cloned().unwrap_or_default();
+    
+    if account_id.is_empty() {
+        return (StatusCode::BAD_REQUEST, "account_id is required").into_response();
+    }
+    
+    match state.db.get_session(&session_id, &account_id).await {
+        Ok(Some((messages, metadata))) => {
+            Json(serde_json::json!({
+                "session_id": session_id,
+                "account_id": account_id,
+                "messages": messages,
+                "metadata": metadata,
+                "created_at": "2026-03-13T00:00:00Z",
+                "updated_at": "2026-03-13T00:00:00Z", 
+            })).into_response()
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, "Session not found").into_response(),
+        Err(e) => {
+            error!("Failed to get session: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
+    }
+}
+
+/// Get a list of sessions for an account
+async fn list_sessions(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    // Extract account ID from query parameters
+    let account_id = params.get("account_id").cloned().unwrap_or_default();
+    let session_id = params.get("session_id").cloned();
+    
+    if account_id.is_empty() {
+        return (StatusCode::BAD_REQUEST, "account_id is required").into_response();
+    }
+    
+    // If specific session_id is provided, we get only that session
+    if let Some(sid) = &session_id {
+        match state.db.get_session(sid, &account_id).await {
+            Ok(Some((messages, metadata))) => {
+                Json(vec![serde_json::json!({
+                    "session_id": sid,
+                    "account_id": account_id,
+                    "messages": messages,
+                    "metadata": metadata,
+                    "created_at": "2026-03-13T00:00:00Z",
+                    "updated_at": "2026-03-13T00:00:00Z", 
+                })]).into_response()
+            }
+            Ok(None) => Json(vec![]).into_response(),
+            Err(e) => {
+                error!("Failed to get session: {}", e);
+                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+            }
+        }
+    } else {
+        // List all sessions for the account
+        match state.db.list_sessions(&account_id).await {
+            Ok(session_ids) => {
+                let mut sessions = Vec::new();
+                for sid in session_ids {
+                    match state.db.get_session(&sid, &account_id).await {
+                        Ok(Some((messages, metadata))) => {
+                            sessions.push(serde_json::json!({
+                                "session_id": sid,
+                                "account_id": account_id,
+                                "messages": messages,
+                                "metadata": metadata,
+                                "created_at": "2026-03-13T00:00:00Z",
+                                "updated_at": "2026-03-13T00:00:00Z", 
+                            }));
+                        }
+                        Ok(None) => {
+                            // Skip sessions that don't exist (shouldn't happen, but just in case)
+                        }
+                        Err(e) => {
+                            error!("Failed to get session {}: {}", sid, e);
+                        }
+                    }
+                }
+                Json(sessions).into_response()
+            }
+            Err(e) => {
+                error!("Failed to list sessions: {}", e);
+                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+            }
+        }
+    }
 }
 
 // ============================================================================

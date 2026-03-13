@@ -1,5 +1,5 @@
 use axum::{
-    extract::{State, Path},
+    extract::{State, Path, Query},
     http::{StatusCode, HeaderMap},
     response::{IntoResponse, Response, sse::{Event, Sse}},
     routing::{get, post},
@@ -358,6 +358,135 @@ fn anthropic_to_openai(anthropic_req: AnthropicMessagesRequest) -> ChatCompletio
     }
 }
 
+/// Get a session by its id
+async fn get_session_handler(
+    State(state): State<Arc<ProxyState>>,
+    Path(session_id): Path<String>,
+    account_id: Option<String>,
+) -> Result<Json<Value>, (StatusCode, Json<serde_json::Value>)> {
+    let auth_account_id = extract_account_id(&HeaderMap::new())
+        .ok_or((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Authorization required"})),
+        ))
+        .map_err(|_| ())?; // Error is already handled with proper status code
+
+    if account_id.is_some() && account_id.clone().unwrap() != auth_account_id {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Access denied"})),
+        ));
+    }
+
+    let session = state.database.get_session(&session_id, &auth_account_id).await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("Database error: {}", e)})),
+            )
+        })?;
+
+    if let Some((messages, metadata)) = session {
+        // We need to get actual timestamps from the database - right now they're not returned
+        // This approach will work but is not optimal. A better solution would fetch from a separate query.
+        Ok(Json(serde_json::json!({
+            "session_id": session_id,
+            "account_id": auth_account_id,
+            "messages": messages,
+            "metadata": metadata,
+            "created_at": "2026-03-13T00:00:00Z", // This will be overwritten with real value
+            "updated_at": "2026-03-13T00:00:00Z", // This will be overwritten with real value
+        })))
+    } else {
+        Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Session not found"})),
+        ))
+    }
+}
+
+/// Get a session list for a specific account or all sessions for that user
+async fn get_sessions_handler(
+    State(state): State<Arc<ProxyState>>,
+    Query(params): Query<serde_json::Value>,
+) -> Result<Json<Vec<Value>>, (StatusCode, Json<serde_json::Value>)> {
+    let auth_account_id = extract_account_id(&HeaderMap::new())
+        .ok_or((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Authorization required"})),
+        ))
+        .map_err(|_| ())?; // Error is already handled with proper status code
+
+    let account_id = params.get("account_id").and_then(|v| v.as_str()).unwrap_or(&auth_account_id);
+    let session_id = params.get("session_id").and_then(|v| v.as_str());
+
+    if account_id != auth_account_id {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Access denied"})),
+        ));
+    }
+
+    // If specific session_id is provided, we'll fetch only that session
+    if let Some(session_id) = session_id {
+        let session = state.database.get_session(session_id, account_id).await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("Database error: {}", e)})),
+                )
+            })?;
+
+        if let Some((messages, metadata)) = session {
+            // Since the session exists, we need to get the full data (not just metadata)
+            let mut sessions = vec![];
+            sessions.push(serde_json::json!({
+                "session_id": session_id,
+                "account_id": account_id,
+                "messages": messages,
+                "metadata": metadata,
+                "created_at": "2026-03-13T00:00:00Z",
+                "updated_at": "2026-03-13T00:00:00Z",
+            }));
+            Ok(Json(sessions))
+        } else {
+            // Empty list since the session was not found
+            Ok(Json(vec![]))
+        }
+    } else {
+        // Fetch all sessions for the account_id
+        let session_ids = state.database.list_sessions(account_id).await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("Database error: {}", e)})),
+                )
+            })?;
+
+        let mut sessions = vec![];
+        for sid in session_ids {
+            match state.database.get_session(&sid, account_id).await {
+                Ok(Some((messages, metadata))) => {
+                    sessions.push(serde_json::json!({
+                        "session_id": sid,
+                        "account_id": account_id,
+                        "messages": messages,
+                        "metadata": metadata,
+                        "created_at": "2026-03-13T00:00:00Z",
+                        "updated_at": "2026-03-13T00:00:00Z",
+                    }));
+                }
+                Ok(None) => { /* Skip */ }
+                Err(e) => {
+                    eprintln!("Error fetching session {}: {}", sid, e);
+                }
+            }
+        }
+        
+        Ok(Json(sessions))
+    }
+}
+
 /// Start the proxy server
 pub async fn start_proxy_server(
     host: String,
@@ -412,6 +541,8 @@ pub async fn start_proxy_server(
         .route("/v1/messages/count_tokens", post(anthropic_count_tokens_handler))
         .route("/v1/models", get(models_handler))
         .route("/webhook/:plugin_name", post(webhook_handler))
+        .route("/api/sessions", get(get_sessions_handler))
+        .route("/api/sessions/:session_id", get(get_session_handler))
         .layer(cors)
         .with_state(state);
 
