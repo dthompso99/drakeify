@@ -277,7 +277,7 @@ async fn list_sessions(
                     "updated_at": "2026-03-13T00:00:00Z", 
                 })]).into_response()
             }
-            Ok(None) => Json(vec![]).into_response(),
+            Ok(None) => Json::<Vec<serde_json::Value>>(vec![]).into_response(),
             Err(e) => {
                 error!("Failed to get session: {}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
