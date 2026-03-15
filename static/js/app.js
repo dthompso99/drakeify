@@ -513,13 +513,16 @@ function connectWebSocket() {
 // INITIALIZATION
 // ============================================================================
 
-// Build navigation from registry
-buildNavigation();
+// Wait for DOM to be ready before initializing
+document.addEventListener('DOMContentLoaded', function() {
+    // Build navigation from registry
+    buildNavigation();
 
-// Handle authentication
-if (!authToken) {
-    showLoginForm();
-} else {
-    connectWebSocket(); // Connect WebSocket if already authenticated
-}
+    // Handle authentication
+    if (!authToken) {
+        showLoginForm();
+    } else {
+        connectWebSocket(); // Connect WebSocket if already authenticated
+    }
+});
 
