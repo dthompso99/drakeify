@@ -149,6 +149,15 @@ async fn main() -> Result<()> {
         .route("/", get(index_page))
         .route("/health", get(health_check))
         .route("/drake.svg", get(drake_logo))
+        // CSS files
+        .route("/css/styles.css", get(serve_styles_css))
+        // JS files
+        .route("/js/utils.js", get(serve_utils_js))
+        .route("/js/sessions.js", get(serve_sessions_js))
+        .route("/js/llm-configs.js", get(serve_llm_configs_js))
+        .route("/js/plugins.js", get(serve_plugins_js))
+        .route("/js/tools.js", get(serve_tools_js))
+        .route("/js/app.js", get(serve_app_js))
 
         // WebSocket for live updates (auth required)
         .merge(ws_router)
@@ -184,6 +193,57 @@ async fn drake_logo() -> impl axum::response::IntoResponse {
     (
         [(axum::http::header::CONTENT_TYPE, "image/svg+xml")],
         include_str!("../../static/drake.svg"),
+    )
+}
+
+/// Serve CSS files
+async fn serve_styles_css() -> impl axum::response::IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/css")],
+        include_str!("../../static/css/styles.css"),
+    )
+}
+
+/// Serve JS files
+async fn serve_utils_js() -> impl axum::response::IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+        include_str!("../../static/js/utils.js"),
+    )
+}
+
+async fn serve_sessions_js() -> impl axum::response::IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+        include_str!("../../static/js/sessions.js"),
+    )
+}
+
+async fn serve_llm_configs_js() -> impl axum::response::IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+        include_str!("../../static/js/llm-configs.js"),
+    )
+}
+
+async fn serve_plugins_js() -> impl axum::response::IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+        include_str!("../../static/js/plugins.js"),
+    )
+}
+
+async fn serve_tools_js() -> impl axum::response::IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+        include_str!("../../static/js/tools.js"),
+    )
+}
+
+async fn serve_app_js() -> impl axum::response::IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+        include_str!("../../static/js/app.js"),
     )
 }
 
