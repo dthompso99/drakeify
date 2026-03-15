@@ -250,6 +250,16 @@ function renderSessionDetail(session) {
     // Messages might be in session.messages or metadata.messages
     let messages = session.messages || metadata.messages || [];
 
+    // If messages is a string, try to parse it as JSON
+    if (typeof messages === 'string') {
+        try {
+            messages = JSON.parse(messages);
+        } catch (e) {
+            console.error('Failed to parse messages JSON:', e);
+            messages = [];
+        }
+    }
+
     // Ensure messages is always an array
     if (!Array.isArray(messages)) {
         console.warn('Messages is not an array:', messages);
