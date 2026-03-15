@@ -53,12 +53,24 @@ function refreshSessions() {
     }
 
     if (!authToken) {
-        document.getElementById('sessions-list').innerHTML =
-            '<div class="error">Please authenticate first</div>';
+        const sessionsList = document.getElementById('sessions-list');
+        if (sessionsList) {
+            sessionsList.innerHTML = '<div class="error">Please authenticate first</div>';
+        }
         return;
     }
 
-    document.getElementById('sessions-list').innerHTML = '<div class="loading">Loading sessions...</div>';
+    const sessionsList = document.getElementById('sessions-list');
+    if (!sessionsList) {
+        // Sessions view is not currently loaded, stop auto-refresh
+        if (autoRefreshInterval) {
+            clearInterval(autoRefreshInterval);
+            autoRefreshInterval = null;
+        }
+        return;
+    }
+
+    sessionsList.innerHTML = '<div class="loading">Loading sessions...</div>';
 
     fetch(`/api/sessions?account_id=${encodeURIComponent(currentAccountId)}`, {
         headers: { 'Authorization': 'Bearer ' + authToken }
@@ -235,7 +247,14 @@ function viewSessionDetail(sessionId) {
  */
 function renderSessionDetail(session) {
     const metadata = session.metadata || {};
-    const messages = session.messages || [];
+    // Messages might be in session.messages or metadata.messages
+    let messages = session.messages || metadata.messages || [];
+
+    // Ensure messages is always an array
+    if (!Array.isArray(messages)) {
+        console.warn('Messages is not an array:', messages);
+        messages = [];
+    }
 
     let html = `
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 2rem;">

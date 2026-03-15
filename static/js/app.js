@@ -440,10 +440,16 @@ function submitToken() {
 // ============================================================================
 
 let ws = null;
-const statusEl = document.getElementById('ws-status');
 
 function connectWebSocket() {
+    const statusEl = document.getElementById('ws-status');
     const token = localStorage.getItem('drakeify_token');
+
+    if (!statusEl) {
+        console.warn('WebSocket status element not found');
+        return;
+    }
+
     if (!token) {
         statusEl.textContent = '● Not authenticated';
         statusEl.style.background = '#64748b';
