@@ -10,6 +10,7 @@ use clap::{Parser, Subcommand};
 use drakeify::*;
 use tracing::{info, warn};
 use std::io::Write;
+use reqwest::header::{self, HeaderMap, HeaderValue, AUTHORIZATION};
 
 /// Drakeify CLI - Interactive AI Agent and Plugin/Tool Manager
 #[derive(Parser, Debug)]
@@ -898,9 +899,12 @@ async fn run_interactive_mode(config: &DrakeifyConfig) -> Result<()> {
         session_manager.update_messages(conversation_messages.clone()).await?;
     }
 
+    let mut headers = HeaderMap::new();
+    headers.insert("Authorization", format!("Bearer {}", config.identity).parse()?);
     // Create HTTP client for talking to the proxy
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(900))
+        .default_headers(headers)
         .build()?;
 
     // Convert 0.0.0.0 to localhost for client connections
